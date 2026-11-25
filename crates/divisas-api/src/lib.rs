@@ -20,7 +20,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 /// Railway deployment URL — override with `DIVISAS_API_BASE_URL` if it changes.
-pub const DEFAULT_BASE_URL: &str = "https://divisas-api.up.railway.app";
+pub const DEFAULT_BASE_URL: &str = "https://divisas-api-production-9a6a0cb6.up.railway.app";
 
 pub const COUNTRIES: &[&str] = &["DO", "CO", "PE", "GT", "CR", "NI", "MX"];
 pub const CURRENCIES: &[&str] = &["USD", "EUR", "CHF", "GBP", "CAD"];

@@ -39,7 +39,7 @@ Responses use the `{ data, meta }` envelope; errors are `{ "error": { code, mess
 
 ```sh
 export DIVISAS_API_KEY="your-key"
-# optional: export DIVISAS_API_BASE_URL="https://divisas-api.up.railway.app"
+# optional: export DIVISAS_API_BASE_URL="https://divisas-api-production-9a6a0cb6.up.railway.app"
 cargo run -p divisas-ui
 ```
 
