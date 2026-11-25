@@ -1,0 +1,12 @@
+[package]
+name = "divisas-api"
+description = "Client for the divisas-cloud public API (Firebase Cloud Functions)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ureq.workspace = true

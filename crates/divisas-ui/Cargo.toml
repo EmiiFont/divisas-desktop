@@ -1,0 +1,16 @@
+[package]
+name = "divisas-ui"
+description = "Desktop client for divisas-cloud built with GPUI"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "divisas-desktop"
+path = "src/main.rs"
+
+[dependencies]
+divisas-api = { path = "../divisas-api" }
+serde.workspace = true
+serde_json.workspace = true
+gpui.workspace = true
