@@ -363,7 +363,7 @@ impl Render for DivisasApp {
                     .text_size(px(11.))
                     .text_color(rgb(0x6B7280))
                     .child(self.status.clone().unwrap_or_else(|| {
-                        "divisas-cloud · GET apiRatesLatest/apiBanks/apiRemittanceQuotes".into()
+                        "divisas-cloud · GET /v1/rates/latest, /v1/banks, /v1/official, /v1/averages, /v1/remittance/quotes".into()
                     })),
             )
     }

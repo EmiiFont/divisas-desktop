@@ -1,19 +1,26 @@
-//! Client for the [divisas-cloud](https://github.com/EmiiFont/divisas-cloud) public API.
+//! Client for the [divisas-cloud](https://github.com/EmiiFont/divisas-cloud) API.
 //!
-//! The backend is a set of Firebase Cloud Functions (project `bankpricesstore`).
-//! Each endpoint is a standalone function reachable at:
+//! The backend is a Hono service (`apps/api`) deployed on Railway. REST routes:
 //!
-//! `https://<region>-bankpricesstore.cloudfunctions.net/<functionName>`
+//! - `GET /healthz` — no API key required
+//! - `GET /v1/rates/latest?country=&currency=`
+//! - `GET /v1/banks?country=`
+//! - `GET /v1/banks/{key}`
+//! - `GET /v1/rates/history/{key}?from=&to=`
+//! - `GET /v1/official?date=`
+//! - `GET /v1/averages?country=&currency=`
+//! - `GET /v1/remittance/quotes?targetCountry=&sourceCountry=&amount=&limit=`
 //!
-//! All endpoints are GET-only and require an `X-API-Key` header. Responses use
-//! the envelope `{ "data": ..., "meta": ... }`; errors are JSON with
-//! `{ "error": { "code", "message" } }` (or a flattened `code`/`message`).
+//! All `/v1/*` routes require an `X-API-Key` header. Responses use the
+//! envelope `{ "data": ..., "meta": ... }`; errors are JSON with
+//! `{ "error": { "code", "message" } }`.
 
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const DEFAULT_BASE_URL: &str = "https://us-central1-bankpricesstore.cloudfunctions.net";
+/// Railway deployment URL — override with `DIVISAS_API_BASE_URL` if it changes.
+pub const DEFAULT_BASE_URL: &str = "https://divisas-api.up.railway.app";
 
 pub const COUNTRIES: &[&str] = &["DO", "CO", "PE", "GT", "CR", "NI", "MX"];
 pub const CURRENCIES: &[&str] = &["USD", "EUR", "CHF", "GBP", "CAD"];
@@ -61,12 +68,12 @@ impl DivisasClient {
     // Endpoints
     // ------------------------------------------------------------------
 
-    /// `apiHealth` — no API key required.
+    /// `GET /healthz` — no API key required.
     pub fn health(&self) -> Result<HealthResponse, ApiError> {
-        self.get_json("apiHealth", &[])
+        self.get_json("healthz", &[])
     }
 
-    /// `apiRatesLatest` — flat best-rate rows for one currency across banks.
+    /// `GET /v1/rates/latest` — flat best-rate rows for one currency across banks.
     ///
     /// Params: `country` (required, e.g. `DO`), `currency` (optional, default USD).
     pub fn rates_latest(&self, country: &str, currency: Option<&str>) -> Result<RatesLatestResponse, ApiError> {
@@ -74,21 +81,21 @@ impl DivisasClient {
         if let Some(currency) = currency {
             params.push(("currency", currency));
         }
-        self.get_json("apiRatesLatest", &params)
+        self.get_json("v1/rates/latest", &params)
     }
 
-    /// `apiBanks` — banks with full rate lists for a country.
+    /// `GET /v1/banks` — banks with full rate lists for a country.
     pub fn banks(&self, country: &str) -> Result<BanksResponse, ApiError> {
-        self.get_json("apiBanks", &[("country", country)])
+        self.get_json("v1/banks", &[("country", country)])
     }
 
-    /// `apiBankDetail` — single bank by key (first path segment).
+    /// `GET /v1/banks/{key}` — single bank by key.
     pub fn bank_detail(&self, key: &str) -> Result<BankDetailResponse, ApiError> {
-        let path = format!("apiBankDetail/{}", key);
+        let path = format!("v1/banks/{}", urlencode(key));
         self.get_json(&path, &[])
     }
 
-    /// `apiRatesHistory` — history points for a bank key.
+    /// `GET /v1/rates/history/{key}` — history points for a bank key.
     pub fn rates_history(
         &self,
         key: &str,
@@ -102,17 +109,17 @@ impl DivisasClient {
         if let Some(to) = to {
             params.push(("to", to));
         }
-        let path = format!("apiRatesHistory/{}", key);
+        let path = format!("v1/rates/history/{}", urlencode(key));
         self.get_json(&path, &params)
     }
 
-    /// `apiOfficial` — Banco Central reference rates for (or before) a date.
+    /// `GET /v1/official` — Banco Central reference rates for (or before) a date.
     pub fn official(&self, date: Option<&str>) -> Result<OfficialResponse, ApiError> {
         let params = date.map(|d| [("date", d)]).unwrap_or_default();
-        self.get_json("apiOfficial", &params)
+        self.get_json("v1/official", &params)
     }
 
-    /// `apiAverages` — market averages per country/currency.
+    /// `GET /v1/averages` — market averages per country/currency.
     pub fn averages(&self, country: Option<&str>, currency: Option<&str>) -> Result<AveragesResponse, ApiError> {
         let mut params = Vec::new();
         if let Some(country) = country {
@@ -121,10 +128,10 @@ impl DivisasClient {
         if let Some(currency) = currency {
             params.push(("currency", currency));
         }
-        self.get_json("apiAverages", &params)
+        self.get_json("v1/averages", &params)
     }
 
-    /// `apiRemittanceQuotes` — remittance quotes for a corridor.
+    /// `GET /v1/remittance/quotes` — remittance quotes for a corridor.
     ///
     /// `target_country` is required (e.g. `DO`); `source_country` defaults to `US`.
     pub fn remittance_quotes(
@@ -146,7 +153,7 @@ impl DivisasClient {
         if let Some(limit) = limit_string.as_deref() {
             params.push(("limit", limit));
         }
-        self.get_json("apiRemittanceQuotes", &params)
+        self.get_json("v1/remittance/quotes", &params)
     }
 
     // ------------------------------------------------------------------
@@ -165,11 +172,35 @@ impl DivisasClient {
         }
 
         let mut request = self.agent.get(&url);
-        if path != "apiHealth" {
+        if path != "healthz" {
             request = request.header("X-API-Key", &self.api_key);
         }
 
-        let body: Envelope<T> = request.call()?.body_mut().read_json()?;
+        let mut response = request.call().map_err(|err| match err {
+            ureq::Error::StatusCode(code) => ApiError::Api {
+                status: code,
+                code: "http-error".into(),
+                message: format!("request to {url} failed"),
+            },
+            other => ApiError::Network(other),
+        })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error: ErrorBody = response.body_mut().read_json().unwrap_or(ErrorBody {
+                error: ErrorDetail {
+                    code: "http-error".into(),
+                    message: format!("HTTP {} from {url}", status.as_u16()),
+                },
+            });
+            return Err(ApiError::Api {
+                status: status.as_u16(),
+                code: error.error.code,
+                message: error.error.message,
+            });
+        }
+
+        let body: Envelope<T> = response.body_mut().read_json()?;
         Ok(body.data)
     }
 }
@@ -194,6 +225,17 @@ fn urlencode(input: &str) -> String {
 #[derive(Debug, Deserialize)]
 struct Envelope<T> {
     data: T,
+}
+
+#[derive(Debug, Deserialize)]
+struct ErrorBody {
+    error: ErrorDetail,
+}
+
+#[derive(Debug, Deserialize)]
+struct ErrorDetail {
+    code: String,
+    message: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -377,18 +419,31 @@ pub fn flatten_averages(response: &AveragesResponse) -> Vec<MarketAverage> {
     for (country, currencies) in &response.countries {
         let Some(currencies) = currencies.as_object() else { continue };
         for (currency, average) in currencies {
-            let Ok(average) = serde_json::from_value::<MarketAverage>(average.clone()) else {
+            let Ok(average) = serde_json::from_value::<MarketAverageEntry>(average.clone()) else {
                 continue;
             };
             rows.push(MarketAverage {
                 country: country.clone(),
                 currency: currency.clone(),
-                ..average
+                avg_buy: average.avg_buy,
+                avg_sale: average.avg_sale,
+                avg_spread: average.avg_spread,
             });
         }
     }
     rows.sort_by(|a, b| (&a.country, &a.currency).cmp(&(&b.country, &b.currency)));
     rows
+}
+
+#[derive(Debug, Deserialize)]
+struct MarketAverageEntry {
+    #[serde(rename = "avgBuy")]
+    avg_buy: f64,
+    #[serde(rename = "avgSale")]
+    avg_sale: f64,
+    #[serde(rename = "avgSpread")]
+    #[serde(default)]
+    avg_spread: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -469,5 +524,40 @@ mod tests {
         }"#;
         let parsed: Envelope<RatesLatestResponse> = serde_json::from_str(body).unwrap();
         assert_eq!(parsed.data.rates[0].buy_change.as_deref(), Some("increase"));
+    }
+
+    #[test]
+    fn error_body_shape() {
+        let body = r#"{
+            "error": { "code": "missing-api-key", "message": "Provide an API key via the X-API-Key header." }
+        }"#;
+        let parsed: ErrorBody = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed.error.code, "missing-api-key");
+    }
+
+    #[test]
+    fn averages_shape() {
+        let body = r#"{
+            "data": {
+                "generatedAt": "2026-01-01T00:00:00Z",
+                "countries": {
+                    "DO": {
+                        "USD": { "avgBuy": 62.1, "avgSale": 62.9, "avgSpread": 0.8 },
+                        "EUR": { "avgBuy": 67.0, "avgSale": 68.0 }
+                    }
+                }
+            },
+            "meta": {}
+        }"#;
+        let parsed: Envelope<AveragesResponse> = serde_json::from_str(body).unwrap();
+        let rows = flatten_averages(&parsed.data);
+        assert_eq!(rows.len(), 2);
+        // Sorted by country then currency: EUR before USD.
+        assert_eq!(rows[0].currency, "EUR");
+        assert_eq!(rows[0].avg_buy, 67.0);
+        assert_eq!(rows[1].currency, "USD");
+        assert_eq!(rows[1].avg_buy, 62.1);
+        assert!(rows[1].avg_spread.is_some());
+        assert!(rows[0].avg_spread.is_none());
     }
 }

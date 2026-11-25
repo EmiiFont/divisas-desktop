@@ -14,20 +14,20 @@ divisas-desktop/
 
 ## Backend contract
 
-The backend is Firebase Cloud Functions (project `bankpricesstore`); each endpoint is a standalone HTTPS function requiring `X-API-Key` (GET only):
+The backend is a Hono service (`apps/api` in divisas-cloud) deployed on Railway. REST routes, all GET-only, authenticated with `X-API-Key`:
 
-| Function | Purpose | Params |
+| Route | Purpose | Params |
 |---|---|---|
-| `apiHealth` | health check | — (no key) |
-| `apiRatesLatest` | best rates per bank | `country`, `currency` |
-| `apiBanks` | banks + full rate lists | `country` |
-| `apiBankDetail` | one bank | path: `{key}` |
-| `apiRatesHistory` | rate history | path: `{key}`, `from`, `to` |
-| `apiOfficial` | Banco Central reference rates | `date` |
-| `apiAverages` | market averages | `country`, `currency` |
-| `apiRemittanceQuotes` | remittance quotes | `targetCountry`, `sourceCountry`, `amount`, `limit` |
+| `GET /healthz` | health check | — (no key) |
+| `GET /v1/rates/latest` | best rates per bank | `country`, `currency` |
+| `GET /v1/banks` | banks + full rate lists | `country` |
+| `GET /v1/banks/{key}` | one bank | path: `{key}` |
+| `GET /v1/rates/history/{key}` | rate history | path: `{key}`, `from`, `to` |
+| `GET /v1/official` | Banco Central reference rates | `date` |
+| `GET /v1/averages` | market averages | `country`, `currency` |
+| `GET /v1/remittance/quotes` | remittance quotes | `targetCountry`, `sourceCountry`, `amount`, `limit` |
 
-Responses use the `{ data, meta }` envelope. Countries: `DO, CO, PE, GT, CR, NI, MX`; currencies: `USD, EUR, CHF, GBP, CAD`.
+Responses use the `{ data, meta }` envelope; errors are `{ "error": { code, message } }`. Countries: `DO, CO, PE, GT, CR, NI, MX`; currencies: `USD, EUR, CHF, GBP, CAD`.
 
 ## Prerequisites
 
@@ -39,7 +39,7 @@ Responses use the `{ data, meta }` envelope. Countries: `DO, CO, PE, GT, CR, NI,
 
 ```sh
 export DIVISAS_API_KEY="your-key"
-# optional: export DIVISAS_API_BASE_URL="https://<region>-bankpricesstore.cloudfunctions.net"
+# optional: export DIVISAS_API_BASE_URL="https://divisas-api.up.railway.app"
 cargo run -p divisas-ui
 ```
 
