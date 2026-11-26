@@ -10,9 +10,9 @@ mod text_input;
 mod theme;
 
 use gpui::{
-    AnyElement, App, AppContext, Application, Bounds, ClickEvent, Context, Entity, FocusHandle,
-    Focusable, KeyBinding, Render, SharedString, TitlebarOptions, Window, WindowBounds,
-    WindowOptions, actions, div, prelude::*, px, rgb, size, white,
+    Animation, AnimationExt, AnyElement, App, AppContext, Application, Bounds, ClickEvent, Context,
+    ElementId, Entity, FocusHandle, Focusable, KeyBinding, Render, SharedString, TitlebarOptions,
+    Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, rgb, size, white,
 };
 use gpui::Rgba;
 
@@ -844,7 +844,7 @@ fn render_drawer(drawer: &Drawer, cx: &mut Context<DivisasApp>) -> AnyElement {
         );
 
     let body: AnyElement = match &drawer.state {
-        DrawerState::Loading => message("Loading bank detail…"),
+        DrawerState::Loading => skeleton_list(3),
         DrawerState::Error(message_text) => message_box(message_text, DOWN_SOFT, DOWN),
         DrawerState::Ready { detail, history } => {
             let mut section = div().flex().flex_col().gap(px(theme::SPACE_LG)).p(px(theme::SPACE_LG));
@@ -1404,7 +1404,7 @@ fn message(text: &str) -> AnyElement {
 }
 
 /// Pulsing placeholder card used while data is loading.
-fn skeleton_card() -> AnyElement {
+fn skeleton_card(index: usize) -> AnyElement {
     div()
         .flex()
         .flex_row()
@@ -1443,6 +1443,17 @@ fn skeleton_card() -> AnyElement {
                 .rounded(px(theme::RADIUS_SM))
                 .bg(rgb(Palette::SURFACE_HOVER)),
         )
+        // Gentle opacity pulse; phase offset per card so they shimmer
+        // in sequence rather than in lockstep.
+        .with_animation(
+            ElementId::Name(SharedString::from(format!("skeleton-{index}"))),
+            Animation::new(std::time::Duration::from_millis(1400)).repeat(),
+            move |card, delta| {
+                let phase = (delta + index as f32 * 0.15).fract();
+                let pulse = 0.55 + 0.25 * (phase * std::f32::consts::TAU).cos();
+                card.opacity(pulse)
+            },
+        )
         .into_any_element()
 }
 
@@ -1452,7 +1463,7 @@ fn skeleton_list(count: usize) -> AnyElement {
         .flex()
         .flex_col()
         .gap(px(theme::SPACE_MD))
-        .children((0..count).map(|_| skeleton_card()).collect::<Vec<_>>())
+        .children((0..count).map(skeleton_card).collect::<Vec<_>>())
         .into_any_element()
 }
 
