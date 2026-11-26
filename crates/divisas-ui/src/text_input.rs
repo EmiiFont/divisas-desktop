@@ -106,6 +106,7 @@ impl TextInput {
     }
 
     fn previous_boundary(&self, offset: usize) -> usize {
+        let offset = self.clamp_boundary(offset);
         self.content[..offset]
             .char_indices()
             .next_back()
@@ -114,11 +115,23 @@ impl TextInput {
     }
 
     fn next_boundary(&self, offset: usize) -> usize {
+        let offset = self.clamp_boundary(offset);
         self.content[offset..]
             .chars()
             .next()
             .map(|ch| offset + ch.len_utf8())
             .unwrap_or(self.content.len())
+    }
+
+    /// Clamp an offset to a valid UTF-8 char boundary within the content.
+    /// GPUI dispatches text-input actions inside an `extern "C"` callback,
+    /// so a panic here aborts the process — clamp instead.
+    fn clamp_boundary(&self, offset: usize) -> usize {
+        let mut offset = offset.min(self.content.len());
+        while offset > 0 && !self.content.is_char_boundary(offset) {
+            offset -= 1;
+        }
+        offset
     }
 
     fn index_for_mouse_position(&self, position: Point<Pixels>) -> usize {
@@ -129,11 +142,18 @@ impl TextInput {
         else {
             return 0;
         };
-        line.closest_index_for_x(position.x - bounds.left())
+        // The shaped line indexes the *display* text; for masked content
+        // every source char is one "•", so byte indices don't line up with
+        // the source. Clamp to a char boundary either way.
+        let index = line.closest_index_for_x(position.x - bounds.left());
+        self.clamp_boundary(index)
     }
 
     fn offset_to_utf16(&self, offset: usize) -> usize {
-        self.content[..offset].chars().map(|ch| ch.len_utf16()).sum()
+        self.content[..self.clamp_boundary(offset)]
+            .chars()
+            .map(|ch| ch.len_utf16())
+            .sum()
     }
 
     fn offset_from_utf16(&self, offset: usize) -> usize {
@@ -165,7 +185,7 @@ impl EntityInputHandler for TextInput {
         _cx: &mut Context<Self>,
     ) -> Option<String> {
         let start = self.offset_from_utf16(range_utf16.start);
-        let end = self.offset_from_utf16(range_utf16.end);
+        let end = self.offset_from_utf16(range_utf16.end).max(start);
         Some(self.content[start..end].to_string())
     }
 
@@ -201,18 +221,29 @@ impl EntityInputHandler for TextInput {
     ) {
         let range = range_utf16
             .map(|range| {
-                self.offset_from_utf16(range.start)..self.offset_from_utf16(range.end)
+                let start = self.offset_from_utf16(range.start);
+                let end = self.offset_from_utf16(range.end).max(start);
+                start..end
             })
             .unwrap_or_else(|| {
                 let caret = self.offset_to_utf16(self.caret);
-                self.offset_from_utf16(caret)..self.offset_from_utf16(caret)
+                let caret = self.offset_from_utf16(caret);
+                caret..caret
             });
+
+        // IME may hand us a range past the current content (stale state);
+        // clamp both ends so slicing can't panic.
+        let range = {
+            let start = self.clamp_boundary(range.start);
+            let end = self.clamp_boundary(range.end).max(start);
+            start..end
+        };
 
         self.content = (self.content[0..range.start].to_owned()
             + new_text
             + &self.content[range.end..])
             .into();
-        self.caret = range.start + new_text.len();
+        self.caret = self.clamp_boundary(range.start + new_text.len());
         cx.notify();
     }
 
@@ -357,7 +388,15 @@ impl Element for InputField {
 
         // Caret index in display-text coordinates: masked text maps every
         // source char to a single "•", so chars-before-caret works directly.
-        let caret_chars = content[..caret.min(content.len())].chars().count();
+        // Clamp to a boundary first — the caret can transiently sit mid-char
+        // (e.g. after an IME replace) and slicing would panic.
+        let caret = content
+            .char_indices()
+            .map(|(index, _)| index)
+            .take_while(|&index| index <= caret)
+            .last()
+            .unwrap_or(0);
+        let caret_chars = content[..caret].chars().count();
 
         let cursor = input.focus_handle.is_focused(window).then(|| {
             fill(
