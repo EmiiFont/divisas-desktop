@@ -2297,68 +2297,123 @@ fn banks_view(banks: &[Bank]) -> AnyElement {
     div()
         .flex()
         .flex_col()
-        .gap(px(theme::SPACE_MD))
-        .children(
-            banks
-                .iter()
-                .map(|bank| {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(theme::SPACE_MD))
-                        .p(px(theme::SPACE_LG))
-                        .rounded(px(theme::RADIUS_MD))
-                        .bg(rgb(Palette::SURFACE))
-                        .border_1()
-                        .border_color(rgb(Palette::BORDER))
-                        .hover(|style| style.bg(rgb(Palette::SURFACE_HOVER)))
-                        .child(
+        .gap(px(theme::SPACE_2XL))
+        .child(section_title("Banks"))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(theme::SPACE_MD))
+                .children(
+                    banks
+                        .iter()
+                        .map(|bank| {
                             div()
                                 .flex()
-                                .flex_row()
-                                .justify_between()
+                                .flex_col()
+                                .gap(px(theme::SPACE_MD))
+                                .p(px(theme::SPACE_LG))
+                                .rounded(px(theme::RADIUS_LG))
+                                .bg(rgb(Palette::SURFACE))
+                                .border_1()
+                                .border_color(rgb(Palette::BORDER))
+                                .hover(|style| style.bg(rgb(Palette::SURFACE_HOVER)))
                                 .child(
+                                    // Header row: avatar disc + name + last-updated time
                                     div()
-                                        .text_size(px(theme::TEXT_BASE))
-                                        .text_color(rgb(Palette::TEXT))
-                                        .child(bank.name.clone()),
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .justify_between()
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_row()
+                                                .items_center()
+                                                .gap(px(theme::SPACE_SM))
+                                                .child(
+                                                    div()
+                                                        .size(px(28.))
+                                                        .rounded_full()
+                                                        .bg(rgb(Palette::ACCENT_SOFT))
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .text_size(px(theme::TEXT_SM))
+                                                        .text_color(rgb(Palette::ACCENT_TEXT))
+                                                        .child(
+                                                            bank.name
+                                                                .chars()
+                                                                .next()
+                                                                .unwrap_or('?')
+                                                                .to_string(),
+                                                        ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(px(theme::TEXT_BASE))
+                                                        .text_color(rgb(Palette::TEXT))
+                                                        .child(bank.name.clone()),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(theme::TEXT_XS))
+                                                .text_color(rgb(Palette::TEXT_TERTIARY))
+                                                .child(
+                                                    bank.last_updated
+                                                        .as_deref()
+                                                        .map(theme::short_time)
+                                                        .unwrap_or_else(|| "—".into()),
+                                                ),
+                                        ),
                                 )
                                 .child(
+                                    // Rate chips: violet-tinted currency tag + green buy / red sell
                                     div()
-                                        .text_size(px(theme::TEXT_XS))
-                                        .text_color(rgb(Palette::TEXT_TERTIARY))
-                                        .child(
-                                            bank.last_updated
-                                                .as_deref()
-                                                .map(theme::short_time)
-                                                .unwrap_or_else(|| "—".into()),
-                                        ),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .flex_wrap()
-                                .gap(px(theme::SPACE_SM))
-                                .children(bank.rates.iter().map(|rate| {
-                                    div()
-                                        .px_3()
-                                        .py_1()
-                                        .rounded(px(theme::RADIUS_SM))
-                                        .bg(rgb(Palette::SURFACE_SUNKEN))
-                                        .text_size(px(theme::TEXT_XS))
-                                        .text_color(rgb(Palette::TEXT_SECONDARY))
-                                        .child(format!(
-                                            "{}  {} / {}",
-                                            rate.currency,
-                                            theme::format_rate(rate.buy),
-                                            theme::format_rate(rate.sell)
-                                        ))
-                                })),
-                        )
-                })
-                .collect::<Vec<_>>(),
+                                        .flex()
+                                        .flex_row()
+                                        .flex_wrap()
+                                        .gap(px(theme::SPACE_SM))
+                                        .children(bank.rates.iter().map(|rate| {
+                                            div()
+                                                .flex()
+                                                .flex_row()
+                                                .items_center()
+                                                .gap(px(theme::SPACE_MD))
+                                                .px_3()
+                                                .py_1()
+                                                .rounded(px(theme::RADIUS_SM))
+                                                .bg(rgb(Palette::SURFACE_SUNKEN))
+                                                .child(
+                                                    div()
+                                                        .text_size(px(theme::TEXT_XS))
+                                                        .text_color(rgb(Palette::ACCENT_TEXT))
+                                                        .child(rate.currency.clone()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(px(theme::TEXT_SM))
+                                                        .text_color(rgb(Palette::UP))
+                                                        .child(theme::format_rate(rate.buy)),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(px(theme::TEXT_XS))
+                                                        .text_color(rgb(Palette::TEXT_TERTIARY))
+                                                        .child("/"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(px(theme::TEXT_SM))
+                                                        .text_color(rgb(Palette::DOWN))
+                                                        .child(theme::format_rate(rate.sell)),
+                                                )
+                                        })),
+                                )
+                        })
+                        .collect::<Vec<_>>(),
+                ),
         )
         .into_any_element()
 }
@@ -2367,52 +2422,108 @@ fn averages_view(rows: &[MarketAverage]) -> AnyElement {
     div()
         .flex()
         .flex_col()
-        .gap(px(theme::SPACE_MD))
-        .children(
-            rows.iter()
-                .map(|row| {
+        .gap(px(theme::SPACE_2XL))
+        .child(section_title("Market averages"))
+        .child(
+            // Column header
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(theme::SPACE_LG))
+                .px(px(theme::SPACE_LG))
+                .child(
                     div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(theme::SPACE_LG))
-                        .p(px(theme::SPACE_LG))
-                        .rounded(px(theme::RADIUS_MD))
-                        .bg(rgb(Palette::SURFACE))
-                        .border_1()
-                        .border_color(rgb(Palette::BORDER))
-                        .child(
+                        .w(px(64.))
+                        .text_size(px(theme::TEXT_XS))
+                        .text_color(rgb(Palette::TEXT_TERTIARY))
+                        .child("CURRENCY"),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(theme::TEXT_XS))
+                        .text_color(rgb(Palette::TEXT_TERTIARY))
+                        .child("AVG BUY"),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(theme::TEXT_XS))
+                        .text_color(rgb(Palette::TEXT_TERTIARY))
+                        .child("AVG SELL"),
+                )
+                .child(
+                    div()
+                        .w(px(80.))
+                        .text_size(px(theme::TEXT_XS))
+                        .text_color(rgb(Palette::TEXT_TERTIARY))
+                        .child("SPREAD"),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(theme::SPACE_XS))
+                .children(
+                    rows.iter()
+                        .map(|row| {
                             div()
-                                .w(px(64.))
-                                .text_size(px(theme::TEXT_BASE))
-                                .text_color(rgb(Palette::TEXT))
-                                .child(row.currency.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(theme::TEXT_XS))
-                                .text_color(rgb(Palette::UP))
-                                .child(format!("buy {}", theme::format_rate(row.avg_buy))),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(theme::TEXT_XS))
-                                .text_color(rgb(Palette::DOWN))
-                                .child(format!("sell {}", theme::format_rate(row.avg_sale))),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(theme::TEXT_XS))
-                                .text_color(rgb(Palette::TEXT_SECONDARY))
-                                .child(format!(
-                                    "spread {}",
-                                    row.avg_spread
-                                        .map(|spread| theme::format_rate(spread))
-                                        .unwrap_or_else(|| "—".into())
-                                )),
-                        )
-                })
-                .collect::<Vec<_>>(),
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(theme::SPACE_LG))
+                                .px(px(theme::SPACE_LG))
+                                .py(px(theme::SPACE_MD))
+                                .rounded(px(theme::RADIUS_MD))
+                                .bg(rgb(Palette::SURFACE))
+                                .border_1()
+                                .border_color(rgb(Palette::BORDER))
+                                .hover(|style| style.bg(rgb(Palette::SURFACE_HOVER)))
+                                .child(
+                                    // Currency chip
+                                    div()
+                                        .w(px(64.))
+                                        .child(
+                                            div()
+                                                .px_2()
+                                                .py_0p5()
+                                                .rounded(px(theme::RADIUS_SM))
+                                                .bg(rgb(Palette::ACCENT_SOFT))
+                                                .text_size(px(theme::TEXT_XS))
+                                                .text_color(rgb(Palette::ACCENT_TEXT))
+                                                .child(row.currency.clone()),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_size(px(theme::TEXT_BASE))
+                                        .text_color(rgb(Palette::UP))
+                                        .child(theme::format_rate(row.avg_buy)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_size(px(theme::TEXT_BASE))
+                                        .text_color(rgb(Palette::DOWN))
+                                        .child(theme::format_rate(row.avg_sale)),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(80.))
+                                        .text_size(px(theme::TEXT_SM))
+                                        .text_color(rgb(Palette::TEXT_SECONDARY))
+                                        .child(
+                                            row.avg_spread
+                                                .map(|spread| theme::format_rate(spread))
+                                                .unwrap_or_else(|| "—".into()),
+                                        ),
+                                )
+                        })
+                        .collect::<Vec<_>>(),
+                ),
         )
         .into_any_element()
 }
@@ -2470,8 +2581,10 @@ fn calculator_view(rows: &[RateRow], calc: &CalcContext, cx: &mut Context<Divisa
             .text_size(px(theme::TEXT_SM))
             .cursor_pointer()
             .when(selected, |this| {
-                this.bg(rgb(Palette::SURFACE))
-                    .text_color(rgb(Palette::TEXT))
+                this.bg(theme::accent_soft_gradient())
+                    .text_color(rgb(Palette::ACCENT_TEXT))
+                    .border_1()
+                    .border_color(rgb(Palette::ACCENT))
             })
             .when(!selected, |this| {
                 this.text_color(rgb(Palette::TEXT_SECONDARY))
@@ -2501,9 +2614,9 @@ fn calculator_view(rows: &[RateRow], calc: &CalcContext, cx: &mut Context<Divisa
         .gap(px(theme::SPACE_XL))
         .p(px(theme::SPACE_XL))
         .rounded(px(theme::RADIUS_LG))
-        .bg(rgb(Palette::SURFACE))
+        .bg(theme::accent_card_gradient())
         .border_1()
-        .border_color(rgb(Palette::BORDER))
+        .border_color(rgb(Palette::ACCENT))
         // Left: amount input + direction toggle.
         .child(
             div()
@@ -2514,7 +2627,7 @@ fn calculator_view(rows: &[RateRow], calc: &CalcContext, cx: &mut Context<Divisa
                 .child(
                     div()
                         .text_size(px(theme::TEXT_XS))
-                        .text_color(rgb(Palette::TEXT_SECONDARY))
+                        .text_color(rgb(Palette::ACCENT_TEXT))
                         .child("AMOUNT"),
                 )
                 .child(
@@ -2564,7 +2677,7 @@ fn calculator_view(rows: &[RateRow], calc: &CalcContext, cx: &mut Context<Divisa
                 .child(
                     div()
                         .text_size(px(theme::TEXT_XS))
-                        .text_color(rgb(Palette::TEXT_SECONDARY))
+                        .text_color(rgb(Palette::ACCENT_TEXT))
                         .child(match direction {
                             CalcDirection::ForeignToDop => "YOU RECEIVE".to_string(),
                             CalcDirection::DopToForeign => "YOU GET".to_string(),
@@ -2573,7 +2686,7 @@ fn calculator_view(rows: &[RateRow], calc: &CalcContext, cx: &mut Context<Divisa
                 .child(
                     div()
                         .text_size(px(theme::TEXT_DISPLAY))
-                        .text_color(rgb(Palette::UP))
+                        .text_color(rgb(Palette::WHITE))
                         .child(
                             hero_result
                                 .as_ref()
@@ -2584,7 +2697,7 @@ fn calculator_view(rows: &[RateRow], calc: &CalcContext, cx: &mut Context<Divisa
                 .child(
                     div()
                         .text_size(px(theme::TEXT_SM))
-                        .text_color(rgb(Palette::TEXT_SECONDARY))
+                        .text_color(rgb(Palette::ACCENT_TEXT))
                         .child(
                             hero_result
                                 .as_ref()
@@ -2742,20 +2855,20 @@ fn remittance_view(quotes: &[RemittanceQuote]) -> AnyElement {
                     .flex_col()
                     .gap_1()
                     .p(px(theme::SPACE_LG))
-                    .rounded(px(theme::RADIUS_MD))
-                    .bg(rgb(Palette::SURFACE))
+                    .rounded(px(theme::RADIUS_LG))
+                    .bg(theme::accent_card_gradient())
                     .border_1()
-                    .border_color(rgb(Palette::BORDER))
+                    .border_color(rgb(Palette::ACCENT))
                     .child(
                         div()
                             .text_size(px(theme::TEXT_XS))
-                            .text_color(rgb(Palette::TEXT_SECONDARY))
+                            .text_color(rgb(Palette::ACCENT_TEXT))
                             .child(label.to_string()),
                     )
                     .child(
                         div()
                             .text_size(px(theme::TEXT_DISPLAY))
-                            .text_color(rgb(Palette::TEXT))
+                            .text_color(rgb(Palette::WHITE))
                             .child(value.unwrap_or_else(|| "—".into())),
                     )
             })
@@ -2777,10 +2890,10 @@ fn remittance_view(quotes: &[RemittanceQuote]) -> AnyElement {
                 .items_center()
                 .gap(px(theme::SPACE_LG))
                 .p(px(theme::SPACE_LG))
-                .rounded(px(theme::RADIUS_MD))
+                .rounded(px(theme::RADIUS_LG))
                 .bg(rgb(Palette::SURFACE))
                 .border_1()
-                .border_color(rgb(if best_quote { Palette::UP } else { Palette::BORDER }))
+                .border_color(rgb(if best_quote { Palette::ACCENT } else { Palette::BORDER }))
                 .hover(|style| style.bg(rgb(Palette::SURFACE_HOVER)))
                 .child(
                     // Provider name + delivery speed.
@@ -2807,9 +2920,9 @@ fn remittance_view(quotes: &[RemittanceQuote]) -> AnyElement {
                                             .px_2()
                                             .py(px(2.))
                                             .rounded(px(theme::RADIUS_SM))
-                                            .bg(rgb(Palette::UP_SOFT))
+                                            .bg(rgb(Palette::ACCENT_SOFT))
                                             .text_size(px(theme::TEXT_XS))
-                                            .text_color(rgb(Palette::UP))
+                                            .text_color(rgb(Palette::ACCENT_TEXT))
                                             .child("BEST PAYOUT"),
                                     )
                                 }),
