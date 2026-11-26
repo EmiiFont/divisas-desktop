@@ -9,8 +9,14 @@ license.workspace = true
 name = "divisas-desktop"
 path = "src/main.rs"
 
+[features]
+# Compile Metal shaders at app runtime instead of build time. Lets the crate
+# type-check on machines without Xcode; the released build should not use it.
+runtime-shaders = ["gpui/runtime_shaders"]
+
 [dependencies]
 divisas-api = { path = "../divisas-api" }
 serde.workspace = true
 serde_json.workspace = true
 gpui.workspace = true
+keyring = "3"

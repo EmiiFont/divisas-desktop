@@ -38,13 +38,24 @@ Responses use the `{ data, meta }` envelope; errors are `{ "error": { code, mess
 ## Running
 
 ```sh
-export DIVISAS_API_KEY="your-key"
+export DIVISAS_WEB_API_KEY="<AIza... web API key from Firebase project settings>"  # for sign-in
 # optional: export DIVISAS_API_BASE_URL="https://divisas-api-production-9a6a0cb6.up.railway.app"
 cargo run -p divisas-ui
 ```
 
+### Sign-in flow
+
+There is no shared API key. On first launch the app shows a login screen:
+
+1. Email + password → Firebase Identity Toolkit (`accounts:signInWithPassword`) → ID token.
+2. `POST /v1/keys` with `Authorization: Bearer <id-token>` → a fresh free-tier API key (shown once, stored server-side only as a hash; re-issuing revokes the previous key).
+3. The key is stored in the OS keychain (service `divisas-desktop`). Subsequent launches skip the login screen.
+
+`DIVISAS_API_KEY` in the environment bypasses the login flow entirely.
+
 ## Features
 
+- Login screen: email/password → Firebase Identity Toolkit → `POST /v1/keys` → key stored in the OS keychain
 - Tabs: **Rates** (best buy/sell per bank), **Banks**, **Official** (Banco Central), **Averages**, **Remittance** quotes
 - Country + currency chip filters
 - Blocking HTTP (`ureq`) executed on GPUI's background executor, results applied back to the entity on the main thread
@@ -54,4 +65,12 @@ cargo run -p divisas-ui
 
 ```sh
 cargo test --workspace
+```
+
+## macOS prerequisites
+
+GPUI compiles Metal shaders at build time, so Xcode (not just Command Line Tools) is required:
+
+```sh
+sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
 ```

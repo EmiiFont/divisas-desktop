@@ -22,6 +22,11 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 /// Railway deployment URL — override with `DIVISAS_API_BASE_URL` if it changes.
 pub const DEFAULT_BASE_URL: &str = "https://divisas-api-production-9a6a0cb6.up.railway.app";
 
+/// Firebase web API key (Identity Toolkit) used to exchange email + password
+/// for an ID token. Set with `DIVISAS_WEB_API_KEY`.
+pub const IDENTITY_TOOLKIT_URL: &str =
+    "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword";
+
 pub const COUNTRIES: &[&str] = &["DO", "CO", "PE", "GT", "CR", "NI", "MX"];
 pub const CURRENCIES: &[&str] = &["USD", "EUR", "CHF", "GBP", "CAD"];
 
@@ -57,6 +62,9 @@ impl DivisasClient {
         Self {
             agent: ureq::Agent::config_builder()
                 .timeout_global(Some(Duration::from_secs(15)))
+                // Return responses for all statuses so error bodies can be
+                // parsed instead of collapsing into Error::StatusCode.
+                .http_status_as_error(false)
                 .build()
                 .into(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
@@ -156,6 +164,39 @@ impl DivisasClient {
         self.get_json("v1/remittance/quotes", &params)
     }
 
+    /// `POST /v1/keys` — exchange a Firebase ID token for a fresh API key.
+    ///
+    /// The raw key is returned exactly once and only its hash is stored
+    /// server-side. Re-calling revokes any previous key for the owner.
+    pub fn request_api_key(&self, id_token: &str) -> Result<ApiKeyIssued, ApiError> {
+        let url = format!("{}/v1/keys", self.base_url);
+        let mut response = self
+            .agent
+            .post(&url)
+            .header("Authorization", &format!("Bearer {id_token}"))
+            .send_json(&serde_json::json!({}))?;
+
+        let status = response.status();
+        let body: serde_json::Value = response.body_mut().read_json()?;
+        if !status.is_success() {
+            return Err(json_error_body(&body, status.as_u16()));
+        }
+        serde_json::from_value(body).map_err(ApiError::from)
+    }
+
+    /// Sign in with email + password against Firebase Identity Toolkit and
+    /// immediately mint an API key. Convenience wrapper over [`Self::sign_in`]
+    /// and [`Self::request_api_key`].
+    pub fn sign_in_and_issue_key(
+        &self,
+        email: &str,
+        password: &str,
+        web_api_key: &str,
+    ) -> Result<ApiKeyIssued, ApiError> {
+        let id_token = sign_in_password(email, password, web_api_key)?;
+        self.request_api_key(&id_token)
+    }
+
     // ------------------------------------------------------------------
     // Plumbing
     // ------------------------------------------------------------------
@@ -176,14 +217,7 @@ impl DivisasClient {
             request = request.header("X-API-Key", &self.api_key);
         }
 
-        let mut response = request.call().map_err(|err| match err {
-            ureq::Error::StatusCode(code) => ApiError::Api {
-                status: code,
-                code: "http-error".into(),
-                message: format!("request to {url} failed"),
-            },
-            other => ApiError::Network(other),
-        })?;
+        let mut response = request.call()?;
 
         let status = response.status();
         if !status.is_success() {
@@ -221,6 +255,83 @@ fn urlencode(input: &str) -> String {
 // ----------------------------------------------------------------------
 // Response envelope
 // ----------------------------------------------------------------------
+
+// ----------------------------------------------------------------------
+// Auth: Firebase Identity Toolkit + API key issuance
+// ----------------------------------------------------------------------
+
+/// Result of `POST /v1/keys` — the raw key is shown exactly once.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiKeyIssued {
+    pub api_key: String,
+    pub key_prefix: String,
+    #[serde(default)]
+    pub tier: Option<String>,
+    #[serde(default)]
+    pub daily_quota: Option<u32>,
+    #[serde(default)]
+    pub warning: Option<String>,
+}
+
+/// Exchange email + password for a Firebase ID token via Google's
+/// Identity Toolkit REST endpoint (needs the project's web API key).
+pub fn sign_in_password(
+    email: &str,
+    password: &str,
+    web_api_key: &str,
+) -> Result<String, ApiError> {
+    let url = format!("{IDENTITY_TOOLKIT_URL}?key={web_api_key}");
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(15)))
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let mut response = agent.post(&url).send_json(&serde_json::json!({
+        "email": email,
+        "password": password,
+        "returnSecureToken": true,
+    }))?;
+
+    let status = response.status();
+    let body: serde_json::Value = response.body_mut().read_json()?;
+    if !status.is_success() {
+        return Err(json_error_body(&body, status.as_u16()));
+    }
+    body.get("idToken")
+        .and_then(|token| token.as_str())
+        .map(|token| token.to_string())
+        .ok_or_else(|| ApiError::Api {
+            status: status.as_u16(),
+            code: "missing-id-token".into(),
+            message: "Sign-in response did not contain an idToken.".into(),
+        })
+}
+
+/// Parse the backend's `{ error: { code, message } }` body.
+fn json_error_body(body: &serde_json::Value, status: u16) -> ApiError {
+    let detail = body.get("error").cloned().unwrap_or(serde_json::Value::Null);
+    let (code, message) = match detail {
+        serde_json::Value::Object(map) => (
+            map.get("code").and_then(|v| v.as_str()).unwrap_or("http-error").to_string(),
+            map.get("message").and_then(|v| v.as_str()).unwrap_or("Request failed.").to_string(),
+        ),
+        // Identity Toolkit nests error differently.
+        _ => (
+            body.get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("http-error")
+                .to_string(),
+            body.get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("Request failed.")
+                .to_string(),
+        ),
+    };
+    ApiError::Api { status, code, message }
+}
 
 #[derive(Debug, Deserialize)]
 struct Envelope<T> {

@@ -1,19 +1,21 @@
-//! Divisas Desktop — GPUI client for the divisas-cloud public API.
+//! Divisas Desktop — GPUI client for the divisas-cloud API.
 //!
-//! Set `DIVISAS_API_KEY` in the environment before launching (all endpoints
-//! except `apiHealth` require it). Optionally override the deployed base URL
-//! with `DIVISAS_API_BASE_URL`.
+//! On first launch a login screen collects email + password, signs in against
+//! Firebase Identity Toolkit (needs `DIVISAS_WEB_API_KEY`), mints an API key
+//! via `POST /v1/keys`, and stores it in the OS keychain. Later launches load
+//! the key straight from the keychain (or `DIVISAS_API_KEY`).
+
+mod keychain;
+mod text_input;
 
 use gpui::{
-    App, AppContext, Application, Bounds, ClickEvent, Context, Entity, FocusHandle, Focusable,
-    KeyBinding, Render, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions,
-    actions, div, prelude::*, px, rgb, size, white,
+    AnyElement, App, AppContext, Application, Bounds, ClickEvent, Context, Entity, FocusHandle,
+    Focusable, KeyBinding, Render, SharedString, TitlebarOptions, Window, WindowBounds,
+    WindowOptions, actions, div, prelude::*, px, rgb, size, white,
 };
 
-use divisas_api::{
-    ApiError, Bank, COUNTRIES, CURRENCIES, DivisasClient, MarketAverage, RateRow, RemittanceQuote,
-    flatten_averages,
-};
+use divisas_api::{ApiError, Bank, COUNTRIES, CURRENCIES, DivisasClient, MarketAverage, RateRow, RemittanceQuote, flatten_averages};
+use text_input::{InputField, TextInput};
 
 // ----------------------------------------------------------------------
 // Actions
@@ -65,9 +67,22 @@ enum Data {
     Remittance(Vec<RemittanceQuote>),
 }
 
+enum Screen {
+    /// Asking for credentials; `error` shown on failure, `busy` while signing in.
+    Login {
+        email: Entity<TextInput>,
+        password: Entity<TextInput>,
+        error: Option<String>,
+        busy: bool,
+    },
+    Main,
+}
+
 struct DivisasApp {
     client: DivisasClient,
+    web_api_key: Option<String>,
     focus_handle: FocusHandle,
+    screen: Screen,
     tab: Tab,
     country: usize,
     currency: usize,
@@ -102,24 +117,22 @@ impl DivisasApp {
                     .rates_latest(&country, Some(&currency))
                     .map(|r| Data::Rates(r.rates)),
                 Tab::Banks => client.banks(&country).map(|r| Data::Banks(r.banks)),
-                Tab::Official => client
-                    .official(None)
-                    .map(|r| Data::Rates(
-                        r.rates
-                            .into_iter()
-                            .map(|rate| RateRow {
-                                key: "banco_central".into(),
-                                name: "Banco Central".into(),
-                                currency: rate.currency,
-                                buy: rate.buy,
-                                sell: rate.sell,
-                                spread: None,
-                                buy_change: None,
-                                sell_change: None,
-                                last_updated: None,
-                            })
-                            .collect(),
-                    )),
+                Tab::Official => client.official(None).map(|r| Data::Rates(
+                    r.rates
+                        .into_iter()
+                        .map(|rate| RateRow {
+                            key: "banco_central".into(),
+                            name: "Banco Central".into(),
+                            currency: rate.currency,
+                            buy: rate.buy,
+                            sell: rate.sell,
+                            spread: None,
+                            buy_change: None,
+                            sell_change: None,
+                            last_updated: None,
+                        })
+                        .collect(),
+                )),
                 Tab::Averages => client
                     .averages(Some(&country), Some(&currency))
                     .map(|r| Data::Averages(flatten_averages(&r))),
@@ -148,7 +161,73 @@ impl DivisasApp {
             })
             .ok();
         })
-        .detach();    }
+        .detach();
+    }
+
+    fn sign_in(&mut self, cx: &mut Context<Self>) {
+        let Screen::Login { email, password, error, busy } = &mut self.screen else {
+            return;
+        };
+        *error = None;
+        if *busy {
+            return;
+        }
+        let email_text = email.read(cx).content.to_string();
+        let password_text = password.read(cx).content.to_string();
+        if email_text.trim().is_empty() || password_text.is_empty() {
+            *error = Some("Enter your email and password.".into());
+            cx.notify();
+            return;
+        }
+        let Some(web_api_key) = self.web_api_key.clone() else {
+            *error = Some(
+                "Set DIVISAS_WEB_API_KEY (Firebase web API key) to enable sign-in.".into(),
+            );
+            cx.notify();
+            return;
+        };
+
+        *busy = true;
+        cx.notify();
+
+        let client = self.client.clone();
+        let task = cx.background_executor().spawn(async move {
+            client.sign_in_and_issue_key(&email_text, &password_text, &web_api_key)
+        });
+
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |app, cx| {
+                let Screen::Login { error, busy, .. } = &mut app.screen else {
+                    return;
+                };
+                *busy = false;
+                match result {
+                    Ok(issued) => {
+                        if let Err(err) = keychain::save_api_key(&issued.api_key) {
+                            *error = Some(format!("Signed in, but could not store key: {err}"));
+                        } else {
+                            app.client = DivisasClient::with_base_url(
+                                issued.api_key,
+                                divisas_api::DEFAULT_BASE_URL,
+                            );
+                            app.screen = Screen::Main;
+                            app.fetch(cx);
+                        }
+                    }
+                    Err(ApiError::Api { status, code, message }) => {
+                        *error = Some(format!("HTTP {status} — {code}: {message}"));
+                    }
+                    Err(err) => {
+                        *error = Some(err.to_string());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
 
     fn set_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
         self.tab = tab;
@@ -174,6 +253,126 @@ impl Focusable for DivisasApp {
 
 impl Render for DivisasApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        match &self.screen {
+            Screen::Login { .. } => self.render_login(cx).into_any_element(),
+            Screen::Main => self.render_main(cx).into_any_element(),
+        }
+    }
+}
+
+impl DivisasApp {
+    fn render_login(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Screen::Login { email, password, error, busy } = &self.screen else {
+            unreachable!()
+        };
+        let email = email.clone();
+        let password = password.clone();
+        let error = error.clone();
+        let busy = *busy;
+
+        let password_submit = password.clone();
+        let email_focus = email.clone();
+
+        div()
+            .track_focus(&self.focus_handle)
+            .key_context("login")
+            .on_action(cx.listener(|app, _: &crate::text_input::Submit, _window, cx| {
+                app.sign_in(cx);
+            }))
+            .on_action(|_: &Quit, _window, cx| cx.quit())
+            .bg(rgb(0x0B1220))
+            .text_color(rgb(0xE5E7EB))
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .p_8()
+                    .rounded(px(12.))
+                    .bg(rgb(0x111827))
+                    .w(px(360.))
+                    .child(
+                        div()
+                            .text_size(px(22.))
+                            .text_color(white())
+                            .child("Divisas Desktop"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(rgb(0x9CA3AF))
+                            .child("Sign in to mint your API key. Stored in the keychain."),
+                    )
+                    .child(
+                        div()
+                            .id("email-box")
+                            .p_2()
+                            .rounded(px(6.))
+                            .bg(rgb(0x1F2937))
+                            .border_1()
+                            .border_color(rgb(0x374151))
+                            .on_click(cx.listener(move |app, _: &ClickEvent, window, cx| {
+                                if let Screen::Login { email, .. } = &app.screen {
+                                    window.focus(&email.read(cx).focus_handle(cx));
+                                }
+                            }))
+                            .child(InputField { input: email_focus }),
+                    )
+                    .child(
+                        div()
+                            .id("password-box")
+                            .p_2()
+                            .rounded(px(6.))
+                            .bg(rgb(0x1F2937))
+                            .border_1()
+                            .border_color(rgb(0x374151))
+                            .on_click(cx.listener(move |app, _: &ClickEvent, window, cx| {
+                                if let Screen::Login { password, .. } = &app.screen {
+                                    window.focus(&password.read(cx).focus_handle(cx));
+                                }
+                            }))
+                            .child(InputField { input: password_submit }),
+                    )
+                    .child(
+                        div()
+                            .id("sign-in")
+                            .px_4()
+                            .py_2()
+                            .rounded(px(6.))
+                            .bg(rgb(0x2563EB))
+                            .text_color(white())
+                            .text_size(px(14.))
+                            .cursor_pointer()
+                            .hover(|this| this.opacity(0.9))
+                            .child(if busy { "Signing in…" } else { "Sign in" })
+                            .on_click(cx.listener(|app, _: &ClickEvent, _window, cx| {
+                                app.sign_in(cx);
+                            })),
+                    )
+                    .children(error.clone().map(|message| {
+                        div()
+                            .p_3()
+                            .rounded(px(6.))
+                            .bg(rgb(0x7F1D1D))
+                            .text_color(rgb(0xFCA5A5))
+                            .text_size(px(12.))
+                            .child(message)
+                    }))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(0x6B7280))
+                            .child("Enter submits. Email + password are sent only to Firebase."),
+                    ),
+            )
+    }
+
+    fn render_main(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let tab = self.tab;
         let country = self.country();
         let currency = self.currency();
@@ -251,14 +450,13 @@ impl Render for DivisasApp {
             .track_focus(&self.focus_handle)
             .key_context("divisas")
             .on_action(cx.listener(|app, _: &Refresh, _window, cx| app.fetch(cx)))
-            .on_action(|_: &Quit, cx| cx.quit())
+            .on_action(|_: &Quit, _window, cx| cx.quit())
             .bg(rgb(0x0B1220))
             .text_color(rgb(0xE5E7EB))
             .size_full()
             .flex()
             .flex_col()
             .child(
-                // Title bar
                 div()
                     .flex()
                     .flex_row()
@@ -301,7 +499,6 @@ impl Render for DivisasApp {
                     ),
             )
             .child(
-                // Tab bar
                 div()
                     .flex()
                     .flex_row()
@@ -311,7 +508,6 @@ impl Render for DivisasApp {
                     .children(tab_bar),
             )
             .child(
-                // Filter chips
                 div()
                     .flex()
                     .flex_col()
@@ -349,6 +545,7 @@ impl Render for DivisasApp {
             )
             .child(
                 div()
+                    .id("content")
                     .flex_1()
                     .overflow_y_scroll()
                     .px_4()
@@ -456,13 +653,13 @@ fn message(text: &str) -> AnyElement {
         .into_any_element()
 }
 
-fn message_box(text: &str, bg: u32, fg: u32) -> AnyElement {
+fn message_box(text: &str, bg: gpui::Rgba, fg: gpui::Rgba) -> AnyElement {
     div()
         .m_4()
         .p_3()
         .rounded(px(8.))
-        .bg(rgb(bg))
-        .text_color(rgb(fg))
+        .bg(bg)
+        .text_color(fg)
         .text_size(px(13.))
         .child(text.to_string())
         .into_any_element()
@@ -478,7 +675,7 @@ fn table(header: &[&str], rows: Vec<Vec<String>>) -> AnyElement {
                 .py_2()
                 .text_size(px(11.))
                 .text_color(rgb(0x9CA3AF))
-                .child(*label)
+                .child(label.to_string())
         })
         .collect::<Vec<_>>();
 
@@ -525,28 +722,60 @@ fn table(header: &[&str], rows: Vec<Vec<String>>) -> AnyElement {
 
 fn main() {
     Application::new().run(|cx: &mut App| {
-        let api_key = std::env::var("DIVISAS_API_KEY").unwrap_or_default();
-        let base_url =
-            std::env::var("DIVISAS_API_BASE_URL").unwrap_or(divisas_api::DEFAULT_BASE_URL.into());
-        let client = DivisasClient::with_base_url(api_key, base_url);
-
+        text_input::bind_text_input_keys(cx);
         cx.bind_keys([
             KeyBinding::new("cmd-r", Refresh, Some("divisas")),
             KeyBinding::new("cmd-q", Quit, Some("divisas")),
         ]);
 
-        let app = cx.new(|cx| {
-            let focus_handle = cx.focus_handle();
-            DivisasApp {
-                client,
-                focus_handle,
-                tab: Tab::Rates,
-                country: 0,
-                currency: 0,
-                data: Data::Empty,
-                status: None,
-            }
-        });
+        let web_api_key = std::env::var("DIVISAS_WEB_API_KEY").ok().filter(|key| !key.is_empty());
+        let base_url = std::env::var("DIVISAS_API_BASE_URL")
+            .unwrap_or(divisas_api::DEFAULT_BASE_URL.into());
+
+        // Prefer an env-provided key, then the keychain; otherwise show login.
+        let stored_key = std::env::var("DIVISAS_API_KEY")
+            .ok()
+            .filter(|key| !key.is_empty())
+            .or_else(keychain::load_api_key);
+
+        let app = match stored_key {
+            Some(api_key) => cx.new(|cx| {
+                let focus_handle = cx.focus_handle();
+                let mut app = DivisasApp {
+                    client: DivisasClient::with_base_url(api_key, base_url),
+                    web_api_key,
+                    focus_handle,
+                    screen: Screen::Main,
+                    tab: Tab::Rates,
+                    country: 0,
+                    currency: 0,
+                    data: Data::Empty,
+                    status: None,
+                };
+                app.fetch(cx);
+                app
+            }),            None => cx.new(|cx| {
+                let focus_handle = cx.focus_handle();
+                let email = cx.new(|cx| TextInput::new("", "email@example.com", false, cx));
+                let password = cx.new(|cx| TextInput::new("", "password", true, cx));
+                DivisasApp {
+                    client: DivisasClient::with_base_url("", base_url),
+                    web_api_key,
+                    focus_handle,
+                    screen: Screen::Login {
+                        email,
+                        password,
+                        error: None,
+                        busy: false,
+                    },
+                    tab: Tab::Rates,
+                    country: 0,
+                    currency: 0,
+                    data: Data::Empty,
+                    status: None,
+                }
+            }),
+        };
 
         let bounds = Bounds::centered(None, size(px(960.), px(640.)), cx);
         cx.open_window(
@@ -563,7 +792,6 @@ fn main() {
         )
         .unwrap();
 
-        app.update(cx, |app, cx| app.fetch(cx)).ok();
         cx.activate(true);
     });
 }
