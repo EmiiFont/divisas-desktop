@@ -110,6 +110,11 @@ pub fn format_rate(value: f64) -> String {
     format!("{value:.2}")
 }
 
+/// Money formatting with thousands separators, e.g. "$12,450.00".
+pub fn format_usd(value: f64) -> String {
+    format_money(value)
+}
+
 pub fn format_money(value: f64) -> String {
     // No thousands separators in Rust format strings; insert manually.
     let formatted = format!("{value:.2}");

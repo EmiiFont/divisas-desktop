@@ -644,9 +644,50 @@ pub struct RemittanceQuote {
     pub last_updated: Option<String>,
 }
 
+impl RemittanceQuote {
+    /// Effective rate: local currency received per USD sent, i.e.
+    /// `amount_received / send_amount`. Returns `(rate, amount_received)`.
+    pub fn effective_rate(&self) -> Option<(f64, f64)> {
+        let sent = self.send_amount?;
+        let received = self.amount_received?;
+        if sent <= 0.0 {
+            return None;
+        }
+        Some((received / sent, received))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remittance_effective_rate() {
+        let quote = RemittanceQuote {
+            provider: "test".into(),
+            name: "Test".into(),
+            key: "test".into(),
+            source_country: Some("US".into()),
+            target_country: Some("DO".into()),
+            source_currency: Some("USD".into()),
+            target_currency: Some("DOP".into()),
+            exchange_rate: Some(62.5),
+            fee_usd: Some(2.99),
+            send_amount: Some(100.0),
+            amount_received: Some(6120.0),
+            delivery_speed_minutes: Some(15),
+            last_updated: None,
+        };
+        let (rate, received) = quote.effective_rate().unwrap();
+        assert_eq!(rate, 61.2);
+        assert_eq!(received, 6120.0);
+
+        let empty = RemittanceQuote {
+            send_amount: None,
+            ..quote
+        };
+        assert!(empty.effective_rate().is_none());
+    }
 
     #[test]
     fn envelope_is_unwrapped() {

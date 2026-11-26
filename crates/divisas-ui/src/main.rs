@@ -1395,80 +1395,184 @@ fn averages_view(rows: &[MarketAverage]) -> AnyElement {
 }
 
 fn remittance_view(quotes: &[RemittanceQuote]) -> AnyElement {
-    div()
+    // Sort by effective rate (amount received per USD sent); the best
+    // payout wins. Quotes missing `amount_received` sink to the bottom.
+    let mut sorted: Vec<&RemittanceQuote> = quotes.iter().collect();
+    sorted.sort_by(|a, b| {
+        let rate = |q: &RemittanceQuote| q.effective_rate().map(|(rate, _)| rate);
+        rate(b)
+            .partial_cmp(&rate(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut cards = div().flex().flex_col().gap(px(theme::SPACE_MD));
+
+    // Corridor summary strip: best payout, best rate, typical fee.
+    let best = sorted.first().and_then(|q| q.effective_rate());
+    let best_fee = sorted.iter().filter_map(|q| q.fee_usd).fold(f64::INFINITY, f64::min);
+    let corridor = div()
         .flex()
-        .flex_col()
+        .flex_row()
         .gap(px(theme::SPACE_MD))
         .children(
-            quotes
-                .iter()
-                .enumerate()
-                .map(|(index, quote)| {
+            [
+                ("You'd receive", best.map(|(_, amount)| theme::format_usd(amount))),
+                ("Best rate", best.map(|(rate, _)| format!("×{rate:.4}"))),
+                (
+                    "Lowest fee",
+                    if best_fee.is_finite() { Some(theme::format_usd(best_fee)) } else { None },
+                ),
+            ]
+            .into_iter()
+            .map(|(label, value)| {
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p(px(theme::SPACE_LG))
+                    .rounded(px(theme::RADIUS_MD))
+                    .bg(rgb(Palette::SURFACE))
+                    .border_1()
+                    .border_color(rgb(Palette::BORDER))
+                    .child(
+                        div()
+                            .text_size(px(theme::TEXT_XS))
+                            .text_color(rgb(Palette::TEXT_SECONDARY))
+                            .child(label.to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(theme::TEXT_DISPLAY))
+                            .text_color(rgb(Palette::TEXT))
+                            .child(value.unwrap_or_else(|| "—".into())),
+                    )
+            })
+            .collect::<Vec<_>>(),
+        );
+    cards = cards.child(corridor);
+
+    for (index, quote) in sorted.iter().enumerate() {
+        let best_quote = index == 0;
+        let (effective_rate, amount) = quote
+            .effective_rate()
+            .map(|(rate, amount)| (Some(rate), Some(amount)))
+            .unwrap_or((None, quote.amount_received));
+
+        cards = cards.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(theme::SPACE_LG))
+                .p(px(theme::SPACE_LG))
+                .rounded(px(theme::RADIUS_MD))
+                .bg(rgb(Palette::SURFACE))
+                .border_1()
+                .border_color(rgb(if best_quote { Palette::UP } else { Palette::BORDER }))
+                .hover(|style| style.bg(rgb(Palette::SURFACE_HOVER)))
+                .child(
+                    // Provider name + delivery speed.
                     div()
+                        .flex_1()
                         .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(theme::SPACE_LG))
-                        .p(px(theme::SPACE_LG))
-                        .rounded(px(theme::RADIUS_MD))
-                        .bg(rgb(Palette::SURFACE))
-                        .border_1()
-                        .border_color(rgb(Palette::BORDER))
-                        .hover(|style| style.bg(rgb(Palette::SURFACE_HOVER)))
+                        .flex_col()
+                        .gap_1()
                         .child(
                             div()
-                                .w(px(32.))
-                                .text_size(px(theme::TEXT_LG))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(theme::SPACE_SM))
+                                .child(
+                                    div()
+                                        .text_size(px(theme::TEXT_BASE))
+                                        .text_color(rgb(Palette::TEXT))
+                                        .child(quote.name.clone()),
+                                )
+                                .when(best_quote, |this| {
+                                    this.child(
+                                        div()
+                                            .px_2()
+                                            .py(px(2.))
+                                            .rounded(px(theme::RADIUS_SM))
+                                            .bg(rgb(Palette::UP_SOFT))
+                                            .text_size(px(theme::TEXT_XS))
+                                            .text_color(rgb(Palette::UP))
+                                            .child("BEST PAYOUT"),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(theme::TEXT_XS))
                                 .text_color(rgb(Palette::TEXT_TERTIARY))
-                                .child(format!("{}", index + 1)),
-                        )
+                                .child(
+                                    quote
+                                        .delivery_speed_minutes
+                                        .map(|minutes| format!("~{minutes} min delivery"))
+                                        .unwrap_or_else(|| quote.key.clone()),
+                                ),
+                        ),
+                )
+                .child(
+                    // Secondary metrics: rate × fee.
+                    div()
+                        .w(px(150.))
+                        .flex()
+                        .flex_col()
+                        .gap_1()
                         .child(
                             div()
-                                .flex_1()
-                                .text_size(px(theme::TEXT_BASE))
-                                .text_color(rgb(Palette::TEXT))
-                                .child(quote.name.clone()),
-                        )
-                        .child(
-                            div()
-                                .w(px(110.))
                                 .text_size(px(theme::TEXT_SM))
                                 .text_color(rgb(Palette::TEXT_SECONDARY))
                                 .child(
-                                    quote
-                                        .exchange_rate
-                                        .map(|rate| format!("×{:.4}", rate))
+                                    effective_rate
+                                        .map(|rate| format!("×{rate:.4}"))
                                         .unwrap_or_else(|| "—".into()),
                                 ),
                         )
                         .child(
                             div()
-                                .w(px(90.))
                                 .text_size(px(theme::TEXT_SM))
-                                .text_color(rgb(Palette::TEXT_SECONDARY))
+                                .text_color(rgb(Palette::TEXT_TERTIARY))
                                 .child(
                                     quote
                                         .fee_usd
-                                        .map(|fee| format!("${fee:.2}"))
+                                        .map(|fee| format!("fee ${fee:.2}"))
+                                        .unwrap_or_else(|| "—".into()),
+                                ),
+                        ),
+                )
+                .child(
+                    // Hero: amount received, sized like a metric tile.
+                    div()
+                        .w(px(150.))
+                        .flex()
+                        .flex_col()
+                        .items_end()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_size(px(theme::TEXT_LG))
+                                .text_color(rgb(if best_quote { Palette::UP } else { Palette::TEXT }))
+                                .child(
+                                    amount
+                                        .map(theme::format_usd)
                                         .unwrap_or_else(|| "—".into()),
                                 ),
                         )
                         .child(
                             div()
-                                .w(px(120.))
-                                .text_size(px(theme::TEXT_BASE))
-                                .text_color(rgb(Palette::UP))
-                                .child(
-                                    quote
-                                        .amount_received
-                                        .map(|amount| format!("${amount:.2}"))
-                                        .unwrap_or_else(|| "—".into()),
-                                ),
-                        )
-                })
-                .collect::<Vec<_>>(),
-        )
-        .into_any_element()
+                                .text_size(px(theme::TEXT_XS))
+                                .text_color(rgb(Palette::TEXT_TERTIARY))
+                                .child("received"),
+                        ),
+                ),
+        );
+    }
+
+    cards.into_any_element()
 }
 
 fn message(text: &str) -> AnyElement {
