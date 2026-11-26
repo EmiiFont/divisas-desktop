@@ -25,7 +25,7 @@ use theme::{DOWN, DOWN_SOFT, TEXT_PRIMARY, UP};
 // Actions
 // ----------------------------------------------------------------------
 
-actions!(divisas, [Refresh, Quit]);
+actions!(divisas, [Refresh, Quit, SwitchTab1, SwitchTab2, SwitchTab3, SwitchTab4, SwitchTab5, SignOut]);
 
 // ----------------------------------------------------------------------
 // State
@@ -301,6 +301,23 @@ impl DivisasApp {
                 }
             }
         }
+        cx.notify();
+    }
+
+    /// Clear the stored session and return to the login screen.
+    fn sign_out(&mut self, cx: &mut Context<Self>) {
+        let _ = session::clear_api_key();
+        self.data = Data::Empty;
+        self.status = None;
+        self.drawer = None;
+        self.reauth_attempts = 0;
+        self.client = DivisasClient::with_base_url("", self.base_url.clone());
+        self.screen = Screen::Login {
+            email: cx.new(|cx| TextInput::new("", "email@example.com", false, cx)),
+            password: cx.new(|cx| TextInput::new("", "password", true, cx)),
+            error: None,
+            busy: false,
+        };
         cx.notify();
     }
 
@@ -685,6 +702,22 @@ impl DivisasApp {
             .track_focus(&self.focus_handle)
             .key_context("divisas")
             .on_action(cx.listener(|app, _: &Refresh, _window, cx| app.fetch(cx)))
+            .on_action(cx.listener(|app, _: &SwitchTab1, _window, cx| {
+                app.set_tab(Tab::ALL[0], cx);
+            }))
+            .on_action(cx.listener(|app, _: &SwitchTab2, _window, cx| {
+                app.set_tab(Tab::ALL[1], cx);
+            }))
+            .on_action(cx.listener(|app, _: &SwitchTab3, _window, cx| {
+                app.set_tab(Tab::ALL[2], cx);
+            }))
+            .on_action(cx.listener(|app, _: &SwitchTab4, _window, cx| {
+                app.set_tab(Tab::ALL[3], cx);
+            }))
+            .on_action(cx.listener(|app, _: &SwitchTab5, _window, cx| {
+                app.set_tab(Tab::ALL[4], cx);
+            }))
+            .on_action(cx.listener(|app, _: &SignOut, _window, cx| app.sign_out(cx)))
             .on_action(|_: &Quit, _window, cx| cx.quit())
             .bg(rgb(Palette::ROOT))
             .text_color(rgb(Palette::TEXT))
@@ -731,12 +764,28 @@ impl DivisasApp {
                             .items_end()
                             .flex()
                             .flex_col()
+                            .gap(px(theme::SPACE_SM))
                             .child(
                                 div()
                                     .px_3()
                                     .text_size(px(theme::TEXT_XS))
                                     .text_color(rgb(Palette::TEXT_TERTIARY))
-                                    .child("⌘R refresh · ⌘Q quit"),
+                                    .child("⌘1–5 tabs · ⌘R refresh · ⌘Q quit"),
+                            )
+                            .child(
+                                div()
+                                    .id("sign-out")
+                                    .px_3()
+                                    .py_2()
+                                    .rounded(px(theme::RADIUS_SM))
+                                    .text_size(px(theme::TEXT_SM))
+                                    .text_color(rgb(Palette::TEXT_SECONDARY))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(Palette::SURFACE_HOVER)))
+                                    .child("Sign out")
+                                    .on_click(cx.listener(|app, _: &ClickEvent, _window, cx| {
+                                        app.sign_out(cx);
+                                    })),
                             ),
                     ),
             )
@@ -1926,6 +1975,12 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new("cmd-r", Refresh, Some("divisas")),
             KeyBinding::new("cmd-q", Quit, Some("divisas")),
+            KeyBinding::new("cmd-1", SwitchTab1, Some("divisas")),
+            KeyBinding::new("cmd-2", SwitchTab2, Some("divisas")),
+            KeyBinding::new("cmd-3", SwitchTab3, Some("divisas")),
+            KeyBinding::new("cmd-4", SwitchTab4, Some("divisas")),
+            KeyBinding::new("cmd-5", SwitchTab5, Some("divisas")),
+            KeyBinding::new("cmd-shift-s", SignOut, Some("divisas")),
         ]);
 
         let web_api_key = std::env::var("DIVISAS_WEB_API_KEY")
