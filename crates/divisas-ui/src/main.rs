@@ -10,16 +10,16 @@ mod text_input;
 mod theme;
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, AppContext, Application, Bounds, ClickEvent, Context,
-    ElementId, Entity, FocusHandle, Focusable, KeyBinding, Render, SharedString, TitlebarOptions,
-    Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, rgb, size, white,
+    Animation, AnimationExt, AnyElement, App, AppContext, Application, Background, Bounds,
+    ClickEvent, Context, ElementId, Entity, FocusHandle, Focusable, KeyBinding, Path, PathBuilder,
+    Pixels, Render, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, actions,
+    canvas, div, point, prelude::*, px, rgb, size, white,
 };
-use gpui::Rgba;
 
 use divisas_api::{ApiKeyIssued, ApiError, Bank, COUNTRIES, CURRENCIES, DivisasClient, HistoryPoint, MarketAverage, RateRow, RemittanceQuote, flatten_averages};
 use text_input::TextInput;
 use theme::Palette;
-use theme::{DOWN, DOWN_SOFT, TEXT_PRIMARY, UP};
+use theme::{DOWN, DOWN_SOFT};
 
 // ----------------------------------------------------------------------
 // Actions
@@ -50,6 +50,18 @@ impl Tab {
             Tab::Averages => "Averages",
             Tab::Remittance => "Remittance",
             Tab::Calculator => "Calculator",
+        }
+    }
+
+    /// Single-glyph icon for the rail buttons.
+    fn glyph(&self) -> &'static str {
+        match self {
+            Tab::Rates => "⇅",
+            Tab::Banks => "▤",
+            Tab::Official => "⚖",
+            Tab::Averages => "∑",
+            Tab::Remittance => "⇄",
+            Tab::Calculator => "±",
         }
     }
 
@@ -154,6 +166,21 @@ struct DivisasApp {
     calc_amount: Entity<TextInput>,
     /// Calculator: direction of the exchange.
     calc_direction: CalcDirection,
+    /// Rate history for the chart (best-buy bank of the selected currency).
+    history: Option<HistoryState>,
+    /// Chart time range in days (7 or 30).
+    history_days: u32,
+    /// Which "About" accordion rows are expanded.
+    about_open: [bool; 3],
+}
+
+/// Async rate-history fetch for the chart.
+#[derive(Clone)]
+struct HistoryState {
+    /// Bank name the series belongs to.
+    bank: String,
+    /// None while loading, Some(Err) on failure.
+    result: Option<Result<Vec<HistoryPoint>, String>>,
 }
 
 impl DivisasApp {
@@ -168,6 +195,10 @@ impl DivisasApp {
     fn fetch(&mut self, cx: &mut Context<Self>) {
         self.data = Data::Loading;
         self.status = Some("Loading…".into());
+        // History is refetched with the tab; drop the old series.
+        if self.tab == Tab::Rates {
+            self.history = None;
+        }
         cx.notify();
 
         let client = self.client.clone();
@@ -237,6 +268,11 @@ impl DivisasApp {
                 match &result {
                     Ok(data) => {
                         app.reauth_attempts = 0;
+                        // When rates load, fetch history for the best-buy
+                        // bank of the selected currency to power the chart.
+                        if tab == Tab::Rates && matches!(data, Data::Rates(_)) {
+                            app.fetch_history(cx);
+                        }
                         app.data = data.clone();
                     }
                     // A rejected key is a session problem, not a data problem:
@@ -249,6 +285,66 @@ impl DivisasApp {
             .ok();
         })
         .detach();
+    }
+
+    /// Fetch rate history for the chart: the best-buy bank of the selected
+    /// currency, over the current `history_days` range.
+    fn fetch_history(&mut self, cx: &mut Context<Self>) {
+        let Data::Rates(rows) = &self.data else {
+            return;
+        };
+        // The bank with the best buy rate — the series the chart tracks.
+        let Some(best) = rows
+            .iter()
+            .filter(|row| row.currency == self.currency())
+            .filter(|row| row.buy.is_finite())
+            .max_by(|a, b| a.buy.partial_cmp(&b.buy).unwrap_or(std::cmp::Ordering::Equal))
+        else {
+            return;
+        };
+
+        let client = self.client.clone();
+        let key = best.key.clone();
+        let bank = best.name.clone();
+        let days = self.history_days;
+        let from = theme::iso_date_days_ago(days as u64);
+        self.history = Some(HistoryState {
+            bank: bank.clone(),
+            result: None,
+        });
+        cx.notify();
+
+        let task = cx.background_executor().spawn(async move {
+            client
+                .rates_history(&key, Some(&from), None)
+                .map(|response| response.points)
+                .map_err(|err| err.to_string())
+        });
+
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |app, cx| {
+                // Ignore stale results if the range changed mid-flight.
+                if app.history_days == days {
+                    app.history = Some(HistoryState {
+                        bank,
+                        result: Some(result),
+                    });
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Set the chart time range and refetch history only.
+    fn set_history_days(&mut self, days: u32, cx: &mut Context<Self>) {
+        if self.history_days == days {
+            return;
+        }
+        self.history_days = days;
+        self.fetch_history(cx);
     }
 
     fn sign_in(&mut self, cx: &mut Context<Self>) {
@@ -661,25 +757,30 @@ impl DivisasApp {
         let country = self.country();
         let currency = self.currency();
 
-        // Sidebar navigation
-        let nav_items = Tab::ALL
+        // ---------------------------------------------------- Icon rail
+        let rail_items = Tab::ALL
             .map(|candidate| {
                 let selected = candidate == tab;
                 div()
-                    .id(SharedString::from(format!("nav-{}", candidate.label())))
-                    .px_3()
-                    .py_2()
-                    .rounded(px(theme::RADIUS_SM))
+                    .id(SharedString::from(format!("rail-{}", candidate.label())))
+                    .size(px(40.))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(17.))
                     .cursor_pointer()
-                    .text_size(px(theme::TEXT_BASE))
                     .when(selected, |this| {
-                        this.bg(rgb(Palette::ACCENT_SOFT)).text_color(rgb(Palette::ACCENT_TEXT))
+                        this.bg(rgb(Palette::ACCENT)).text_color(rgb(Palette::WHITE))
                     })
                     .when(!selected, |this| {
-                        this.text_color(rgb(Palette::TEXT_SECONDARY))
-                            .hover(|style| style.bg(rgb(Palette::SURFACE_HOVER)))
+                        this.text_color(rgb(Palette::TEXT_TERTIARY)).hover(|style| {
+                            style
+                                .bg(rgb(Palette::SURFACE_HOVER))
+                                .text_color(rgb(Palette::TEXT_SECONDARY))
+                        })
                     })
-                    .child(candidate.label())
+                    .child(candidate.glyph())
                     .on_click(cx.listener(move |app, _event: &ClickEvent, _window, cx| {
                         app.set_tab(candidate, cx);
                     }))
@@ -687,7 +788,7 @@ impl DivisasApp {
             .into_iter()
             .collect::<Vec<_>>();
 
-        // Segmented country switcher
+        // Segmented country + currency controls (navbar)
         let country_segments = COUNTRIES
             .iter()
             .enumerate()
@@ -701,7 +802,7 @@ impl DivisasApp {
                     .cursor_pointer()
                     .text_size(px(theme::TEXT_SM))
                     .when(selected, |this| {
-                        this.bg(rgb(Palette::ACCENT_SOFT)).text_color(rgb(Palette::ACCENT_TEXT))
+                        this.bg(rgb(Palette::ACCENT)).text_color(rgb(Palette::WHITE))
                     })
                     .when(!selected, |this| {
                         this.text_color(rgb(Palette::TEXT_SECONDARY))
@@ -727,7 +828,7 @@ impl DivisasApp {
                     .cursor_pointer()
                     .text_size(px(theme::TEXT_SM))
                     .when(selected, |this| {
-                        this.bg(rgb(Palette::ACCENT_SOFT)).text_color(rgb(Palette::ACCENT_TEXT))
+                        this.bg(rgb(Palette::ACCENT)).text_color(rgb(Palette::WHITE))
                     })
                     .when(!selected, |this| {
                         this.text_color(rgb(Palette::TEXT_SECONDARY))
@@ -769,172 +870,103 @@ impl DivisasApp {
             .size_full()
             .flex()
             .flex_row()
-            // ------------------------------------------------ Sidebar
+            // ------------------------------------------------ Icon rail
             .child(
                 div()
-                    .w(px(220.))
+                    .w(px(64.))
                     .flex()
                     .flex_col()
+                    .items_center()
+                    .gap(px(theme::SPACE_LG))
                     .bg(rgb(Palette::SIDEBAR))
                     .border_r_1()
                     .border_color(rgb(Palette::BORDER))
-                    .p(px(theme::SPACE_LG))
+                    .py(px(theme::SPACE_LG))
                     .child(
+                        // Logo: violet gradient circle with a currency glyph
                         div()
-                            .px_3()
-                            .pb(px(theme::SPACE_XL))
-                            .child(
-                                div()
-                                    .text_size(px(theme::TEXT_LG))
-                                    .text_color(rgb(Palette::TEXT))
-                                    .child("Divisas"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(theme::TEXT_XS))
-                                    .text_color(rgb(Palette::TEXT_TERTIARY))
-                                    .child("Exchange rates · divisas-cloud"),
-                            ),
+                            .size(px(40.))
+                            .rounded_full()
+                            .bg(theme::accent_card_gradient())
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(18.))
+                            .text_color(rgb(Palette::WHITE))
+                            .child("¤"),
                     )
                     .child(
                         div()
                             .flex()
                             .flex_col()
-                            .gap(px(theme::SPACE_XS))
-                            .children(nav_items),
+                            .items_center()
+                            .gap(px(theme::SPACE_SM))
+                            .children(rail_items),
                     )
                     .child(
                         div()
                             .flex_1()
-                            .items_end()
                             .flex()
                             .flex_col()
-                            .gap(px(theme::SPACE_SM))
+                            .items_end()
                             .child(
                                 div()
-                                    .px_3()
-                                    .text_size(px(theme::TEXT_XS))
+                                    .id("rail-sign-out")
+                                    .size(px(40.))
+                                    .rounded_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_size(px(15.))
                                     .text_color(rgb(Palette::TEXT_TERTIARY))
-                                    .child("⌘1–6 tabs · ⌘R refresh · ⌘Q quit"),
-                            )
-                            .child(
-                                div()
-                                    .id("sign-out")
-                                    .px_3()
-                                    .py_2()
-                                    .rounded(px(theme::RADIUS_SM))
-                                    .text_size(px(theme::TEXT_SM))
-                                    .text_color(rgb(Palette::TEXT_SECONDARY))
                                     .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(Palette::SURFACE_HOVER)))
-                                    .child("Sign out")
+                                    .hover(|style| {
+                                        style
+                                            .bg(rgb(Palette::SURFACE_HOVER))
+                                            .text_color(rgb(Palette::TEXT_SECONDARY))
+                                    })
+                                    .child("⎋")
                                     .on_click(cx.listener(|app, _: &ClickEvent, _window, cx| {
                                         app.sign_out(cx);
                                     })),
                             ),
                     ),
             )
+            // ------------------------------------------------ Left column
+            .child(self.render_left_column(cx))
             // ------------------------------------------------ Main column
             .child(
                 div()
                     .flex_1()
                     .flex()
                     .flex_col()
+                    .min_w_0()
                     .child(
-                        // Header: title + segmented switchers
+                        // Navbar: segmented switchers, search, refresh pill
                         div()
                             .flex()
-                            .flex_col()
-                            .gap(px(theme::SPACE_LG))
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
                             .px(px(theme::SPACE_2XL))
-                            .pt(px(theme::SPACE_XL))
-                            .pb(px(theme::SPACE_LG))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .justify_between()
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .text_size(px(theme::TEXT_XL))
-                                            .text_color(rgb(Palette::TEXT))
-                                            .child(tab.label()),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_row()
-                                            .items_center()
-                                            .gap(px(theme::SPACE_SM))
-                                            .child(
-                                                div()
-                                                    .id("search-box")
-                                                    .w(px(220.))
-                                                    .flex()
-                                                    .flex_row()
-                                                    .items_center()
-                                                    .gap_2()
-                                                    .px_3()
-                                                    .py_1()
-                                                    .rounded(px(theme::RADIUS_SM))
-                                                    .bg(rgb(Palette::SURFACE_SUNKEN))
-                                                    .border_1()
-                                                    .border_color(rgb(Palette::BORDER))
-                                                    .text_size(px(theme::TEXT_SM))
-                                                    .on_click(cx.listener(
-                                                        |app, _: &ClickEvent, window, cx| {
-                                                            window.focus(
-                                                                &app.search.read(cx).focus_handle(cx),
-                                                            );
-                                                        },
-                                                    ))
-                                                    .child(
-                                                        div()
-                                                            .text_color(rgb(Palette::TEXT_TERTIARY))
-                                                            .child("⌕"),
-                                                    )
-                                                    .child(self.search.clone()),
-                                            )
-                                            .child(
-                                                div()
-                                                    .id("refresh")
-                                                    .px_4()
-                                                    .py_2()
-                                                    .rounded(px(theme::RADIUS_SM))
-                                                    .bg(rgb(Palette::SURFACE))
-                                                    .border_1()
-                                                    .border_color(rgb(Palette::BORDER))
-                                                    .text_size(px(theme::TEXT_SM))
-                                                    .text_color(rgb(Palette::TEXT_SECONDARY))
-                                                    .cursor_pointer()
-                                                    .hover(|style| {
-                                                        style.bg(rgb(Palette::SURFACE_HOVER))
-                                                    })
-                                                    .child("Refresh")
-                                                    .on_click(cx.listener(
-                                                        |app, _event: &ClickEvent, _window, cx| {
-                                                            app.fetch(cx);
-                                                        },
-                                                    )),
-                                            ),
-                                    ),
-                            )
+                            .py(px(theme::SPACE_LG))
                             .child(
                                 div()
                                     .flex()
                                     .flex_row()
                                     .items_center()
-                                    .gap(px(theme::SPACE_LG))
+                                    .gap(px(theme::SPACE_SM))
                                     .child(
                                         div()
                                             .flex()
                                             .flex_row()
                                             .items_center()
-                                            .gap_1()
+                                            .gap(px(theme::SPACE_XS))
                                             .p(px(theme::SPACE_XS))
-                                            .rounded(px(theme::RADIUS_SM))
-                                            .bg(rgb(Palette::SURFACE_SUNKEN))
+                                            .rounded(px(theme::RADIUS_MD))
+                                            .bg(rgb(Palette::SURFACE))
+                                            .border_1()
+                                            .border_color(rgb(Palette::BORDER))
                                             .children(country_segments),
                                     )
                                     .child(
@@ -942,11 +974,67 @@ impl DivisasApp {
                                             .flex()
                                             .flex_row()
                                             .items_center()
-                                            .gap_1()
+                                            .gap(px(theme::SPACE_XS))
                                             .p(px(theme::SPACE_XS))
-                                            .rounded(px(theme::RADIUS_SM))
-                                            .bg(rgb(Palette::SURFACE_SUNKEN))
+                                            .rounded(px(theme::RADIUS_MD))
+                                            .bg(rgb(Palette::SURFACE))
+                                            .border_1()
+                                            .border_color(rgb(Palette::BORDER))
                                             .children(currency_segments),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(theme::SPACE_SM))
+                                    .child(
+                                        div()
+                                            .id("search-box")
+                                            .w(px(220.))
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_2()
+                                            .px_3()
+                                            .py(px(theme::SPACE_XS))
+                                            .rounded(px(theme::RADIUS_MD))
+                                            .bg(rgb(Palette::SURFACE))
+                                            .border_1()
+                                            .border_color(rgb(Palette::BORDER))
+                                            .text_size(px(theme::TEXT_SM))
+                                            .on_click(cx.listener(
+                                                |app, _: &ClickEvent, window, cx| {
+                                                    window.focus(
+                                                        &app.search.read(cx).focus_handle(cx),
+                                                    );
+                                                },
+                                            ))
+                                            .child(
+                                                div()
+                                                    .text_color(rgb(Palette::TEXT_TERTIARY))
+                                                    .child("⌕"),
+                                            )
+                                            .child(self.search.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("refresh")
+                                            .px_4()
+                                            .py(px(theme::SPACE_SM))
+                                            .rounded(px(theme::RADIUS_MD))
+                                            .bg(rgb(Palette::ACCENT))
+                                            .text_size(px(theme::TEXT_SM))
+                                            .text_color(rgb(Palette::WHITE))
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(rgb(Palette::ACCENT_HOVER)))
+                                            .child("Refresh")
+                                            .on_click(cx.listener(
+                                                |app, _: &ClickEvent, _window, cx| {
+                                                    app.fetch(cx);
+                                                },
+                                            )),
                                     ),
                             ),
                     )
@@ -955,11 +1043,11 @@ impl DivisasApp {
                             .id("content")
                             .flex_1()
                             .overflow_y_scroll()
-                            .px(px(theme::SPACE_2XL))
-                            .pb(px(theme::SPACE_XL))
                             .child(
                                 div()
                                     .max_w(px(880.))
+                                    .px(px(theme::SPACE_2XL))
+                                    .pb(px(theme::SPACE_2XL))
                                     .child(render_body(
                                         &self.data,
                                         &self.search.read(cx).content.to_string(),
@@ -975,30 +1063,30 @@ impl DivisasApp {
                                             calc_amount: self.calc_amount.clone(),
                                         },
                                         self.tab,
+                                        self.history.as_ref(),
+                                        self.history_days,
                                         cx,
                                     )),
                             ),
                     )
                     .child(
                         div()
-                            .px(px(theme::SPACE_2XL))
-                            .py(px(theme::SPACE_MD))
-                            .border_t_1()
-                            .border_color(rgb(Palette::BORDER))
-                            .text_size(px(theme::TEXT_XS))
-                            .text_color(rgb(Palette::TEXT_TERTIARY))
                             .flex()
                             .flex_row()
                             .items_center()
                             .gap(px(theme::SPACE_SM))
-                            // Stale-data indicator: green "fresh" dot, amber when > 30 min.
+                            .px(px(theme::SPACE_2XL))
+                            .py(px(theme::SPACE_MD))
+                            .border_t_1()
+                            .border_color(rgb(Palette::BORDER))
                             .children(updated_label(&self.data).map(|(stale, label)| {
                                 let dot = if stale { Palette::WARN } else { Palette::UP };
                                 div()
                                     .flex()
                                     .flex_row()
                                     .items_center()
-                                    .gap(px(theme::SPACE_XS))
+                                    .gap_1()
+                                    .text_size(px(theme::TEXT_XS))
                                     .text_color(rgb(if stale {
                                         Palette::WARN
                                     } else {
@@ -1024,6 +1112,270 @@ impl DivisasApp {
                     .map(|drawer| render_drawer(drawer, cx))
                     .into_iter(),
             )
+    }
+
+    /// Persistent left column: highlight card, market snapshot, data status,
+    /// and informational accordions (the DeFi dashboard's left card stack).
+    fn render_left_column(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("left-column")
+            .w(px(300.))
+            .flex()
+            .flex_col()
+            .gap(px(theme::SPACE_LG))
+            .px(px(theme::SPACE_LG))
+            .py(px(theme::SPACE_XL))
+            .overflow_y_scroll()
+            .child(self.render_highlight_card(cx))
+            .child(self.render_snapshot_card(cx))
+            .child(self.render_status_card(cx))
+            .children(self.render_about_rows(cx))
+            .into_any_element()
+    }
+
+    /// Amber highlight card nudging the user toward the calculator.
+    fn render_highlight_card(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .rounded(px(theme::RADIUS_LG))
+            .bg(rgb(Palette::AMBER_SOFT))
+            .border_1()
+            .border_color(rgb(Palette::AMBER))
+            .p(px(theme::SPACE_LG))
+            .flex()
+            .flex_col()
+            .gap(px(theme::SPACE_SM))
+            .child(
+                div()
+                    .size(px(32.))
+                    .rounded_full()
+                    .bg(rgb(Palette::AMBER))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(14.))
+                    .text_color(rgb(Palette::WHITE))
+                    .child("±"),
+            )
+            .child(
+                div()
+                    .text_size(px(theme::TEXT_BASE))
+                    .text_color(rgb(Palette::TEXT))
+                    .child("Convert in seconds"),
+            )
+            .child(
+                div()
+                    .text_size(px(theme::TEXT_XS))
+                    .text_color(rgb(Palette::TEXT_SECONDARY))
+                    .child("Pick a currency and amount to see what every bank pays."),
+            )
+            .child(
+                div()
+                    .id("open-calculator")
+                    .mt(px(theme::SPACE_XS))
+                    .px_3()
+                    .py_1()
+                    .rounded(px(theme::RADIUS_SM))
+                    .bg(rgb(Palette::AMBER))
+                    .text_size(px(theme::TEXT_SM))
+                    .text_color(rgb(Palette::WHITE))
+                    .cursor_pointer()
+                    .child("Open Calculator")
+                    .on_click(cx.listener(|app, _: &ClickEvent, _window, cx| {
+                        app.set_tab(Tab::Calculator, cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// Market snapshot card: best buy / best sell / average for the pair.
+    fn render_snapshot_card(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (country, currency) = (self.country(), self.currency());
+
+        div()
+            .rounded(px(theme::RADIUS_LG))
+            .bg(rgb(Palette::SURFACE))
+            .border_1()
+            .border_color(rgb(Palette::BORDER))
+            .p(px(theme::SPACE_LG))
+            .flex()
+            .flex_col()
+            .gap(px(theme::SPACE_SM))
+            .child(
+                div()
+                    .text_size(px(theme::TEXT_SM))
+                    .text_color(rgb(Palette::TEXT_SECONDARY))
+                    .child("Market snapshot"),
+            )
+            .child(
+                div()
+                    .text_size(px(theme::TEXT_XS))
+                    .text_color(rgb(Palette::TEXT_TERTIARY))
+                    .child(format!("{country} · {currency}")),
+            )
+            .children(self.snapshot_rows(cx))
+            .into_any_element()
+    }
+
+    fn snapshot_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let _ = cx;
+        let Data::Rates(rows) = &self.data else {
+            return vec![div()
+                .text_size(px(theme::TEXT_XS))
+                .text_color(rgb(Palette::TEXT_TERTIARY))
+                .child("Open the Rates tab to see market data.")
+                .into_any_element()];
+        };
+
+        let matching: Vec<&RateRow> = rows
+            .iter()
+            .filter(|row| row.currency == self.currency())
+            .collect();
+        if matching.is_empty() {
+            return vec![div()
+                .text_size(px(theme::TEXT_XS))
+                .text_color(rgb(Palette::TEXT_TERTIARY))
+                .child("No rates for this pair yet.")
+                .into_any_element()];
+        }
+
+        let best_buy = matching
+            .iter()
+            .max_by(|a, b| a.buy.partial_cmp(&b.buy).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap();
+        let best_sell = matching
+            .iter()
+            .min_by(|a, b| a.sell.partial_cmp(&b.sell).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap();
+        let avg = matching.iter().map(|r| r.buy).sum::<f64>() / matching.len() as f64;
+
+        vec![
+            snapshot_row("Best buy", theme::format_rate(best_buy.buy), best_buy.name.clone()),
+            snapshot_row("Best sell", theme::format_rate(best_sell.sell), best_sell.name.clone()),
+            snapshot_row("Market avg", theme::format_rate(avg), format!("{} banks", matching.len())),
+        ]
+    }
+
+    /// Violet gradient card with the freshness indicator and a refresh button.
+    fn render_status_card(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (stale, label) = updated_label(&self.data).unwrap_or((false, "—".into()));
+        let dot = if stale { Palette::WARN } else { Palette::UP };
+
+        div()
+            .rounded(px(theme::RADIUS_LG))
+            .bg(theme::accent_soft_gradient())
+            .border_1()
+            .border_color(rgb(Palette::BORDER))
+            .p(px(theme::SPACE_LG))
+            .flex()
+            .flex_col()
+            .gap(px(theme::SPACE_SM))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(theme::SPACE_SM))
+                    .child(div().size(px(8.)).rounded_full().bg(rgb(dot)))
+                    .child(
+                        div()
+                            .text_size(px(theme::TEXT_XS))
+                            .text_color(rgb(Palette::TEXT_SECONDARY))
+                            .child(format!("Updated {label}")),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(theme::TEXT_XS))
+                    .text_color(rgb(Palette::TEXT_TERTIARY))
+                    .child("Rates refresh when you switch tabs or pairs."),
+            )
+            .child(
+                div()
+                    .id("left-refresh")
+                    .px_3()
+                    .py_1()
+                    .rounded(px(theme::RADIUS_SM))
+                    .bg(rgb(Palette::ACCENT))
+                    .text_size(px(theme::TEXT_SM))
+                    .text_color(rgb(Palette::WHITE))
+                    .cursor_pointer()
+                    .child("Refresh rates")
+                    .on_click(cx.listener(|app, _: &ClickEvent, _window, cx| {
+                        app.fetch(cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// Informational accordion rows ("How are rates collected?" etc.).
+    fn render_about_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        const ABOUT: [(&str, &str); 3] = [
+            (
+                "How are rates collected?",
+                "Rates are scraped from bank websites several times a day and published by the divisas-cloud API.",
+            ),
+            (
+                "Why do rates differ between banks?",
+                "Each bank sets its own buy and sell prices; the spread between them is how currency exchange earns.",
+            ),
+            (
+                "What is the official rate?",
+                "The Banco Central publishes a reference rate used for official invoicing and customs.",
+            ),
+        ];
+
+        ABOUT
+            .iter()
+            .enumerate()
+            .map(|(index, (title, body))| {
+                let open = self.about_open[index];
+                div()
+                    .rounded(px(theme::RADIUS_MD))
+                    .bg(rgb(Palette::SURFACE))
+                    .border_1()
+                    .border_color(rgb(Palette::BORDER))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("about-{index}")))
+                            .px_3()
+                            .py_2()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(Palette::SURFACE_HOVER)))
+                            .child(
+                                div()
+                                    .text_size(px(theme::TEXT_SM))
+                                    .text_color(rgb(Palette::TEXT))
+                                    .child(*title),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(theme::TEXT_XS))
+                                    .text_color(rgb(Palette::TEXT_TERTIARY))
+                                    .child(if open { "−" } else { "+" }),
+                            )
+                            .on_click(cx.listener(move |app, _: &ClickEvent, _window, cx| {
+                                app.about_open[index] = !app.about_open[index];
+                                cx.notify();
+                            })),
+                    )
+                    .when(open, |this| {
+                        this.child(
+                            div()
+                                .px_3()
+                                .pb_3()
+                                .text_size(px(theme::TEXT_XS))
+                                .text_color(rgb(Palette::TEXT_SECONDARY))
+                                .child(*body),
+                        )
+                    })
+                    .into_any_element()
+            })
+            .collect()
     }
 }
 
@@ -1197,6 +1549,8 @@ fn render_body(
     search: &str,
     calc: &CalcContext,
     tab: Tab,
+    history: Option<&HistoryState>,
+    history_days: u32,
     cx: &mut Context<DivisasApp>,
 ) -> AnyElement {
     // Case-insensitive substring match over the row's searchable text.
@@ -1220,7 +1574,7 @@ fn render_body(
             if filtered.is_empty() && !needle.is_empty() {
                 no_matches(search)
             } else {
-                rates_view(&filtered, cx)
+                rates_view(&filtered, history, history_days, cx)
             }
         }
         Data::Banks(banks) => {
@@ -1435,17 +1789,215 @@ fn error_state(message: &str, cx: &mut Context<DivisasApp>) -> AnyElement {
 }
 
 /// Metric strip shown above the rates grid.
-fn metric_tile(label: &str, value: String, color: Rgba) -> AnyElement {
+/// Section heading inside the main content area.
+fn section_title(title: &str) -> AnyElement {
+    div()
+        .text_size(px(theme::TEXT_LG))
+        .text_color(rgb(Palette::TEXT))
+        .child(title.to_string())
+        .into_any_element()
+}
+
+/// Violet gradient stat card (the design's hero metrics).
+fn gradient_stat_card(label: &str, value: String, detail: String, icon: &str) -> AnyElement {
     div()
         .flex_1()
+        .rounded(px(theme::RADIUS_XL))
+        .bg(theme::accent_card_gradient())
+        .border_1()
+        .border_color(rgb(Palette::BORDER))
+        .p(px(theme::SPACE_LG))
         .flex()
         .flex_col()
-        .gap_1()
-        .p(px(theme::SPACE_LG))
-        .rounded(px(theme::RADIUS_MD))
+        .gap(px(theme::SPACE_SM))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(theme::SPACE_SM))
+                .child(
+                    div()
+                        .size(px(28.))
+                        .rounded_full()
+                        .bg(rgb(Palette::ACCENT_SOFT))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(13.))
+                        .text_color(rgb(Palette::ACCENT_TEXT))
+                        .child(icon.to_string()),
+                )
+                .child(
+                    div()
+                        .text_size(px(theme::TEXT_SM))
+                        .text_color(rgb(Palette::ACCENT_TEXT))
+                        .child(label.to_string()),
+                ),
+        )
+        .child(
+            div()
+                .text_size(px(theme::TEXT_DISPLAY))
+                .text_color(rgb(Palette::WHITE))
+                .child(value),
+        )
+        .child(
+            div()
+                .text_size(px(theme::TEXT_XS))
+                .text_color(rgb(Palette::TEXT_SECONDARY))
+                .child(detail),
+        )
+        .into_any_element()
+}
+
+/// Chart time-range pill (7d / 30d).
+fn range_pill(days: u32, current: u32, cx: &mut Context<DivisasApp>) -> AnyElement {
+    let selected = days == current;
+    div()
+        .id(SharedString::from(format!("range-{days}d")))
+        .px_3()
+        .py_1()
+        .rounded_full()
+        .cursor_pointer()
+        .text_size(px(theme::TEXT_XS))
+        .when(selected, |this| {
+            this.bg(rgb(Palette::ACCENT)).text_color(rgb(Palette::WHITE))
+        })
+        .when(!selected, |this| {
+            this.text_color(rgb(Palette::TEXT_SECONDARY))
+                .hover(|style| style.bg(rgb(Palette::SURFACE_HOVER)))
+        })
+        .child(format!("{days}d"))
+        .on_click(cx.listener(move |app, _: &ClickEvent, _window, cx| {
+            app.set_history_days(days, cx);
+        }))
+        .into_any_element()
+}
+
+/// Area chart with a violet gradient fill, drawn with gpui paths.
+fn history_chart(points: &[HistoryPoint], currency: &str, bank: &str, height: f32) -> AnyElement {
+    // (date, buy) series for the selected currency.
+    let series: Vec<(String, f64)> = points
+        .iter()
+        .filter_map(|point| {
+            let rate = point.rates.iter().find(|rate| rate.currency == currency)?;
+            Some((point.date.clone().unwrap_or_default(), rate.buy))
+        })
+        .collect();
+
+    if series.len() < 2 {
+        return message_box(
+            "Not enough history yet for this pair.",
+            rgb(Palette::SURFACE),
+            rgb(Palette::TEXT_TERTIARY),
+        );
+    }
+
+    let min = series.iter().map(|(_, v)| *v).fold(f64::INFINITY, f64::min);
+    let max = series.iter().map(|(_, v)| *v).fold(f64::NEG_INFINITY, f64::max);
+    let latest = series.last().map(|(_, v)| *v).unwrap_or(0.);
+
+    div()
+        .rounded(px(theme::RADIUS_LG))
         .bg(rgb(Palette::SURFACE))
         .border_1()
         .border_color(rgb(Palette::BORDER))
+        .p(px(theme::SPACE_MD))
+        .flex()
+        .flex_col()
+        .gap(px(theme::SPACE_SM))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_size(px(theme::TEXT_XS))
+                        .text_color(rgb(Palette::TEXT_TERTIARY))
+                        .child(format!("Buy rate · {bank} · {currency}")),
+                )
+                .child(
+                    div()
+                        .text_size(px(theme::TEXT_BASE))
+                        .text_color(rgb(Palette::ACCENT_TEXT))
+                        .child(theme::format_rate(latest)),
+                ),
+        )
+        .child(
+            div().h(px(height)).child(canvas(
+                move |bounds, _window, _cx| build_chart_paths(bounds, &series, min, max),
+                move |_bounds, paths, window, _cx| {
+                    for (path, paint) in paths {
+                        window.paint_path(path, paint);
+                    }
+                },
+            )),
+        )
+        .into_any_element()
+}
+
+/// Build the chart's fill + line paths in window coordinates.
+fn build_chart_paths(
+    bounds: Bounds<Pixels>,
+    series: &[(String, f64)],
+    min: f64,
+    max: f64,
+) -> Vec<(Path<Pixels>, Background)> {
+    let range = (max - min).max(0.0001);
+    let width = f32::from(bounds.size.width);
+    let height = f32::from(bounds.size.height);
+    let origin_x = f32::from(bounds.origin.x);
+    let origin_y = f32::from(bounds.origin.y);
+    let pad_x = 8.0;
+    let pad_top = 10.0;
+    let pad_bottom = 6.0;
+
+    let n = series.len();
+    let plot_w = width - 2.0 * pad_x;
+    let plot_h = height - pad_top - pad_bottom;
+    let x_at = |i: usize| origin_x + pad_x + (i as f32 / (n - 1) as f32) * plot_w;
+    let y_at = |v: f64| origin_y + pad_top + (1.0 - ((v - min) / range) as f32) * plot_h;
+
+    // Stroke: the rate line.
+    let mut line = PathBuilder::stroke(px(2.));
+    line.move_to(point(px(x_at(0)), px(y_at(series[0].1))));
+    for (index, (_, value)) in series.iter().enumerate().skip(1) {
+        line.line_to(point(px(x_at(index)), px(y_at(*value))));
+    }
+    let line = line.build().ok();
+
+    // Fill: area under the line down to the chart floor.
+    let mut fill = PathBuilder::fill();
+    fill.move_to(point(px(x_at(0)), px(y_at(series[0].1))));
+    for (index, (_, value)) in series.iter().enumerate().skip(1) {
+        fill.line_to(point(px(x_at(index)), px(y_at(*value))));
+    }
+    let floor = origin_y + height;
+    fill.line_to(point(px(x_at(n - 1)), px(floor)));
+    fill.line_to(point(px(x_at(0)), px(floor)));
+    fill.line_to(point(px(x_at(0)), px(y_at(series[0].1))));
+    let fill = fill.build().ok();
+
+    let mut paths = Vec::new();
+    if let Some(path) = fill {
+        paths.push((path, theme::chart_fill_gradient()));
+    }
+    if let Some(path) = line {
+        paths.push((path, rgb(Palette::ACCENT).into()));
+    }
+    paths
+}
+
+/// One row in the left-column market snapshot card.
+fn snapshot_row(label: &str, value: String, detail: String) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .py_1()
         .child(
             div()
                 .text_size(px(theme::TEXT_XS))
@@ -1454,64 +2006,153 @@ fn metric_tile(label: &str, value: String, color: Rgba) -> AnyElement {
         )
         .child(
             div()
-                .text_size(px(theme::TEXT_LG))
-                .text_color(color)
-                .child(value),
+                .flex()
+                .flex_col()
+                .items_end()
+                .child(
+                    div()
+                        .text_size(px(theme::TEXT_SM))
+                        .text_color(rgb(Palette::TEXT))
+                        .child(value),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(rgb(Palette::TEXT_TERTIARY))
+                        .child(detail),
+                ),
         )
         .into_any_element()
 }
 
-fn rates_view(rows: &[RateRow], cx: &mut Context<DivisasApp>) -> AnyElement {
-    let best_buy = rows.iter().map(|r| r.buy).fold(f64::NEG_INFINITY, f64::max);
-    let best_sell = rows.iter().map(|r| r.sell).fold(f64::INFINITY, f64::min);
-    let avg_buy = if rows.is_empty() {
-        0.
-    } else {
-        rows.iter().map(|r| r.buy).sum::<f64>() / rows.len() as f64
-    };
+fn rates_view(
+    rows: &[RateRow],
+    history: Option<&HistoryState>,
+    history_days: u32,
+    cx: &mut Context<DivisasApp>,
+) -> AnyElement {
+    let best_buy_row = rows
+        .iter()
+        .filter(|r| r.buy.is_finite())
+        .max_by(|a, b| a.buy.partial_cmp(&b.buy).unwrap_or(std::cmp::Ordering::Equal));
+    let best_sell_row = rows
+        .iter()
+        .filter(|r| r.sell.is_finite())
+        .min_by(|a, b| a.sell.partial_cmp(&b.sell).unwrap_or(std::cmp::Ordering::Equal));
+    let best_buy = best_buy_row.map(|r| r.buy).unwrap_or(0.);
+    // The chart series tracks the selected currency.
+    let chart_currency = rows.first().map(|r| r.currency.as_str()).unwrap_or("USD");
 
     div()
         .flex()
         .flex_col()
-        .gap(px(theme::SPACE_LG))
+        .gap(px(theme::SPACE_2XL))
+        // Section: status — two violet gradient stat cards
         .child(
-            // Metric strip
-            div()
-                .flex()
-                .flex_row()
-                .gap(px(theme::SPACE_MD))
-                .child(metric_tile("Best buy", theme::format_rate(best_buy), UP))
-                .child(metric_tile("Best sell", theme::format_rate(best_sell), DOWN))
-                .child(metric_tile("Market avg", theme::format_rate(avg_buy), TEXT_PRIMARY))
-                .child(metric_tile(
-                    "Banks",
-                    rows.len().to_string(),
-                    TEXT_PRIMARY,
-                )),
-        )
-        .child(
-            // Rate cards grid
             div()
                 .flex()
                 .flex_col()
                 .gap(px(theme::SPACE_MD))
-                .children(
-                    rows.iter()
-                        .map(|row| {
-                            let direction = theme::parse_direction(row.buy_change.as_deref());
-                            let is_best = row.buy == best_buy && rows.len() > 1;
-                            let key = row.key.clone();
-                            let name = row.name.clone();
-                            rate_card(
-                                row,
-                                direction,
-                                is_best,
-                                cx.listener(move |app, _event: &ClickEvent, _window, cx| {
-                                    app.open_drawer(key.clone(), name.clone(), cx);
-                                }),
-                            )
-                        })
-                        .collect::<Vec<_>>(),
+                .child(section_title("Rates status"))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap(px(theme::SPACE_MD))
+                        .child(gradient_stat_card(
+                            "Best buy rate",
+                            best_buy_row
+                                .map(|r| theme::format_rate(r.buy))
+                                .unwrap_or_else(|| "—".into()),
+                            best_buy_row
+                                .map(|r| format!("Best at {}", r.name))
+                                .unwrap_or_else(|| "No rates yet".into()),
+                            "↓",
+                        ))
+                        .child(gradient_stat_card(
+                            "Best sell rate",
+                            best_sell_row
+                                .map(|r| theme::format_rate(r.sell))
+                                .unwrap_or_else(|| "—".into()),
+                            best_sell_row
+                                .map(|r| format!("Lowest at {}", r.name))
+                                .unwrap_or_else(|| "No rates yet".into()),
+                            "↑",
+                        )),
+                ),
+        )
+        // Section: buy-rate history chart
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(theme::SPACE_MD))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .child(section_title("Buy rate history"))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap(px(theme::SPACE_XS))
+                                .child(range_pill(7, history_days, cx))
+                                .child(range_pill(30, history_days, cx)),
+                        ),
+                )
+                .child(match history {
+                    Some(state) => match &state.result {
+                        Some(Ok(points)) => history_chart(points, chart_currency, &state.bank, 220.),
+                        Some(Err(err)) => message_box(
+                            &format!("Couldn't load history: {err}"),
+                            rgb(Palette::DOWN_SOFT),
+                            rgb(Palette::DOWN),
+                        ),
+                        None => skeleton_list(2),
+                    },
+                    None => message_box(
+                        "History loads once rates arrive.",
+                        rgb(Palette::SURFACE),
+                        rgb(Palette::TEXT_TERTIARY),
+                    ),
+                }),
+        )
+        // Section: per-bank rate cards
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(theme::SPACE_MD))
+                .child(section_title("Bank rates"))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(theme::SPACE_MD))
+                        .children(
+                            rows.iter()
+                                .map(|row| {
+                                    let direction =
+                                        theme::parse_direction(row.buy_change.as_deref());
+                                    let is_best = row.buy == best_buy && rows.len() > 1;
+                                    let key = row.key.clone();
+                                    let name = row.name.clone();
+                                    rate_card(
+                                        row,
+                                        direction,
+                                        is_best,
+                                        cx.listener(
+                                            move |app, _event: &ClickEvent, _window, cx| {
+                                                app.open_drawer(key.clone(), name.clone(), cx);
+                                            },
+                                        ),
+                                    )
+                                })
+                                .collect::<Vec<_>>(),
+                        ),
                 ),
         )
         .into_any_element()
@@ -2379,6 +3020,9 @@ fn main() {
                     search,
                     calc_amount,
                     calc_direction: CalcDirection::ForeignToDop,
+                    history: None,
+                    history_days: 30,
+                    about_open: [false; 3],
                 };
                 app.fetch(cx);
                 app
@@ -2411,6 +3055,9 @@ fn main() {
                     search,
                     calc_amount,
                     calc_direction: CalcDirection::ForeignToDop,
+                    history: None,
+                    history_days: 30,
+                    about_open: [false; 3],
                 };
                 // Guest sessions restore silently: mint a fresh key without
                 // showing the login form. Email sessions can't be silent

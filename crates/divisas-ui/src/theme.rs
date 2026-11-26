@@ -5,42 +5,48 @@
 //! larger gaps, content capped at a readable width.
 #![allow(dead_code)]
 
-use gpui::{Hsla, Rgba};
+use gpui::{Background, Hsla, Rgba, linear_color_stop, linear_gradient};
 
 // ----------------------------------------------------------------------
-// Color palette
+// Color palette — DeFi dark: deep purple-black, violet accent
 // ----------------------------------------------------------------------
 
 pub struct Palette;
 
 impl Palette {
-    // Backgrounds (layered, slightly blue-tinted dark)
-    pub const ROOT: u32 = 0x0A0E15;
-    pub const SURFACE: u32 = 0x12161F;
-    pub const SURFACE_HOVER: u32 = 0x1A2130;
-    pub const SURFACE_SUNKEN: u32 = 0x0E1219;
-    pub const SIDEBAR: u32 = 0x0D1119;
+    // Backgrounds (layered, purple-tinted dark)
+    pub const ROOT: u32 = 0x0D0B14;
+    pub const SURFACE: u32 = 0x16121F;
+    pub const SURFACE_HOVER: u32 = 0x1F1A2C;
+    pub const SURFACE_SUNKEN: u32 = 0x0F0D17;
+    pub const SIDEBAR: u32 = 0x12101A;
 
     // Borders
-    pub const BORDER: u32 = 0x1E2633;
-    pub const BORDER_STRONG: u32 = 0x2A3444;
+    pub const BORDER: u32 = 0x251F33;
+    pub const BORDER_STRONG: u32 = 0x352C4A;
 
     // Text
-    pub const TEXT: u32 = 0xF2F5F9;
-    pub const TEXT_SECONDARY: u32 = 0x8A94A6;
-    pub const TEXT_TERTIARY: u32 = 0x5B6675;
+    pub const TEXT: u32 = 0xF2EFF9;
+    pub const TEXT_SECONDARY: u32 = 0xA79FC0;
+    pub const TEXT_TERTIARY: u32 = 0x6B6280;
 
-    // Accent — the only "interactive" color
-    pub const ACCENT: u32 = 0x3B82F6;
-    pub const ACCENT_SOFT: u32 = 0x1B2A4A; // tinted surface for selected states
-    pub const ACCENT_TEXT: u32 = 0x7EB2FF;
+    // Accent — violet, the only "interactive" color
+    pub const ACCENT: u32 = 0x8B7CFF;
+    pub const ACCENT_HOVER: u32 = 0x9E92FF;
+    pub const ACCENT_SOFT: u32 = 0x262043; // tinted surface for selected states
+    pub const ACCENT_TEXT: u32 = 0xB4ABFF;
 
     // Semantic — money direction only
-    pub const UP: u32 = 0x22C55E;
-    pub const UP_SOFT: u32 = 0x11291C;
-    pub const DOWN: u32 = 0xEF4444;
-    pub const DOWN_SOFT: u32 = 0x2D1214;
+    pub const UP: u32 = 0x34D399;
+    pub const UP_SOFT: u32 = 0x12291F;
+    pub const DOWN: u32 = 0xF87171;
+    pub const DOWN_SOFT: u32 = 0x2D1518;
     pub const WARN: u32 = 0xF59E0B;
+
+    // Secondary accent — amber highlight card
+    pub const AMBER: u32 = 0xF59E0B;
+    pub const AMBER_SOFT: u32 = 0x2D2113;
+    pub const AMBER_TEXT: u32 = 0xFBBF24;
 
     // Misc
     pub const WHITE: u32 = 0xFFFFFF;
@@ -67,6 +73,7 @@ pub const TEXT_PRIMARY: Rgba = hex(Palette::TEXT);
 pub const TEXT_SECONDARY: Rgba = hex(Palette::TEXT_SECONDARY);
 pub const TEXT_TERTIARY: Rgba = hex(Palette::TEXT_TERTIARY);
 pub const ACCENT: Rgba = hex(Palette::ACCENT);
+pub const ACCENT_HOVER: Rgba = hex(Palette::ACCENT_HOVER);
 pub const ACCENT_SOFT: Rgba = hex(Palette::ACCENT_SOFT);
 pub const ACCENT_TEXT: Rgba = hex(Palette::ACCENT_TEXT);
 pub const UP: Rgba = hex(Palette::UP);
@@ -74,6 +81,9 @@ pub const UP_SOFT: Rgba = hex(Palette::UP_SOFT);
 pub const DOWN: Rgba = hex(Palette::DOWN);
 pub const DOWN_SOFT: Rgba = hex(Palette::DOWN_SOFT);
 pub const WARN: Rgba = hex(Palette::WARN);
+pub const AMBER: Rgba = hex(Palette::AMBER);
+pub const AMBER_SOFT: Rgba = hex(Palette::AMBER_SOFT);
+pub const AMBER_TEXT: Rgba = hex(Palette::AMBER_TEXT);
 pub const WHITE: Rgba = hex(Palette::WHITE);
 
 // ----------------------------------------------------------------------
@@ -104,6 +114,33 @@ pub const TEXT_DISPLAY: f32 = 28.; // hero numbers
 pub const RADIUS_SM: f32 = 6.;
 pub const RADIUS_MD: f32 = 10.;
 pub const RADIUS_LG: f32 = 14.;
+pub const RADIUS_XL: f32 = 18.;
+
+/// Purple gradient for hero/stat cards (135°, accent → deep tint).
+pub fn accent_card_gradient() -> Background {
+    linear_gradient(
+        135.,
+        linear_color_stop(hex(Palette::ACCENT), 0.42),
+        linear_color_stop(hex(Palette::ACCENT_SOFT), 1.),
+    )
+}
+
+/// Softer violet wash for secondary gradient cards.
+pub fn accent_soft_gradient() -> Background {
+    linear_gradient(
+        135.,
+        linear_color_stop(hex(Palette::ACCENT), 0.14),
+        linear_color_stop(hex(Palette::SURFACE), 1.),
+    )
+}
+
+/// Chart fill gradient: accent fading to transparent, top → bottom.
+pub fn chart_fill_gradient() -> Background {
+    let Rgba { r, g, b, .. } = hex(Palette::ACCENT);
+    let top = Rgba { r, g, b, a: 0.38 };
+    let bottom = Rgba { r, g, b, a: 0.0 };
+    linear_gradient(180., linear_color_stop(top, 0.), linear_color_stop(bottom, 1.))
+}
 
 /// Tabular-figure-friendly formatting for rates.
 pub fn format_rate(value: f64) -> String {
@@ -213,6 +250,30 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146_097 + doe - 719_468
+}
+
+/// Inverse of [`days_from_civil`]: epoch days → (year, month, day).
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// ISO date (YYYY-MM-DD) for N days ago, UTC — for history range queries.
+pub fn iso_date_days_ago(days: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let (y, m, d) = civil_from_days((now / 86_400) as i64 - days as i64);
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 /// Human-readable "time ago" string.
