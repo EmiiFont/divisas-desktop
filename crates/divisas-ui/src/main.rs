@@ -123,6 +123,8 @@ struct DivisasApp {
     drawer: Option<Drawer>,
     /// Guards against re-auth loops when the API keeps rejecting the key.
     reauth_attempts: u32,
+    /// Free-text search that filters the current tab's rows.
+    search: Entity<TextInput>,
 }
 
 impl DivisasApp {
@@ -767,21 +769,61 @@ impl DivisasApp {
                                     )
                                     .child(
                                         div()
-                                            .id("refresh")
-                                            .px_4()
-                                            .py_2()
-                                            .rounded(px(theme::RADIUS_SM))
-                                            .bg(rgb(Palette::SURFACE))
-                                            .border_1()
-                                            .border_color(rgb(Palette::BORDER))
-                                            .text_size(px(theme::TEXT_SM))
-                                            .text_color(rgb(Palette::TEXT_SECONDARY))
-                                            .cursor_pointer()
-                                            .hover(|style| style.bg(rgb(Palette::SURFACE_HOVER)))
-                                            .child("Refresh")
-                                            .on_click(cx.listener(|app, _event: &ClickEvent, _window, cx| {
-                                                app.fetch(cx);
-                                            })),
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap(px(theme::SPACE_SM))
+                                            .child(
+                                                div()
+                                                    .id("search-box")
+                                                    .w(px(220.))
+                                                    .flex()
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .px_3()
+                                                    .py_1()
+                                                    .rounded(px(theme::RADIUS_SM))
+                                                    .bg(rgb(Palette::SURFACE_SUNKEN))
+                                                    .border_1()
+                                                    .border_color(rgb(Palette::BORDER))
+                                                    .text_size(px(theme::TEXT_SM))
+                                                    .on_click(cx.listener(
+                                                        |app, _: &ClickEvent, window, cx| {
+                                                            window.focus(
+                                                                &app.search.read(cx).focus_handle(cx),
+                                                            );
+                                                        },
+                                                    ))
+                                                    .child(
+                                                        div()
+                                                            .text_color(rgb(Palette::TEXT_TERTIARY))
+                                                            .child("⌕"),
+                                                    )
+                                                    .child(self.search.clone()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("refresh")
+                                                    .px_4()
+                                                    .py_2()
+                                                    .rounded(px(theme::RADIUS_SM))
+                                                    .bg(rgb(Palette::SURFACE))
+                                                    .border_1()
+                                                    .border_color(rgb(Palette::BORDER))
+                                                    .text_size(px(theme::TEXT_SM))
+                                                    .text_color(rgb(Palette::TEXT_SECONDARY))
+                                                    .cursor_pointer()
+                                                    .hover(|style| {
+                                                        style.bg(rgb(Palette::SURFACE_HOVER))
+                                                    })
+                                                    .child("Refresh")
+                                                    .on_click(cx.listener(
+                                                        |app, _event: &ClickEvent, _window, cx| {
+                                                            app.fetch(cx);
+                                                        },
+                                                    )),
+                                            ),
                                     ),
                             )
                             .child(
@@ -824,7 +866,11 @@ impl DivisasApp {
                             .child(
                                 div()
                                     .max_w(px(880.))
-                                    .child(render_body(&self.data, cx)),
+                                    .child(render_body(
+                                        &self.data,
+                                        &self.search.read(cx).content.to_string(),
+                                        cx,
+                                    )),
                             ),
                     )
                     .child(
@@ -1040,16 +1086,98 @@ fn render_drawer(drawer: &Drawer, cx: &mut Context<DivisasApp>) -> AnyElement {
         .into_any_element()
 }
 
-fn render_body(data: &Data, cx: &mut Context<DivisasApp>) -> AnyElement {
+fn render_body(data: &Data, search: &str, cx: &mut Context<DivisasApp>) -> AnyElement {
+    // Case-insensitive substring match over the row's searchable text.
+    let needle = search.to_lowercase();
+    let matches = |haystack: &str| haystack.to_lowercase().contains(&needle);
     match data {
         Data::Empty => empty_state(cx),
         Data::Loading => skeleton_list(6),
         Data::Error(message) => error_state(message, cx),
-        Data::Rates(rows) => rates_view(rows, cx),
-        Data::Banks(banks) => banks_view(banks),
-        Data::Averages(rows) => averages_view(rows),
-        Data::Remittance(quotes) => remittance_view(quotes),
+        Data::Rates(rows) => {
+            let filtered: Vec<RateRow> = rows
+                .iter()
+                .filter(|row| {
+                    needle.is_empty()
+                        || matches(&row.name)
+                        || matches(&row.key)
+                        || matches(&row.currency)
+                })
+                .cloned()
+                .collect();
+            if filtered.is_empty() && !needle.is_empty() {
+                no_matches(search)
+            } else {
+                rates_view(&filtered, cx)
+            }
+        }
+        Data::Banks(banks) => {
+            let filtered: Vec<Bank> = banks
+                .iter()
+                .filter(|bank| needle.is_empty() || matches(&bank.name) || matches(&bank.key))
+                .cloned()
+                .collect();
+            if filtered.is_empty() && !needle.is_empty() {
+                no_matches(search)
+            } else {
+                banks_view(&filtered)
+            }
+        }
+        Data::Averages(rows) => {
+            let filtered: Vec<MarketAverage> = rows
+                .iter()
+                .filter(|row| {
+                    needle.is_empty() || matches(&row.country) || matches(&row.currency)
+                })
+                .cloned()
+                .collect();
+            if filtered.is_empty() && !needle.is_empty() {
+                no_matches(search)
+            } else {
+                averages_view(&filtered)
+            }
+        }
+        Data::Remittance(quotes) => {
+            let filtered: Vec<RemittanceQuote> = quotes
+                .iter()
+                .filter(|quote| {
+                    needle.is_empty()
+                        || matches(&quote.name)
+                        || matches(&quote.provider)
+                        || matches(&quote.key)
+                })
+                .cloned()
+                .collect();
+            if filtered.is_empty() && !needle.is_empty() {
+                no_matches(search)
+            } else {
+                remittance_view(&filtered)
+            }
+        }
     }
+}
+
+/// Hint shown when the search filter matches nothing.
+fn no_matches(search: &str) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(theme::SPACE_MD))
+        .py(px(theme::SPACE_2XL + theme::SPACE_2XL))
+        .child(
+            div()
+                .text_size(px(theme::TEXT_MD))
+                .text_color(rgb(Palette::TEXT))
+                .child("No matches"),
+        )
+        .child(
+            div()
+                .text_size(px(theme::TEXT_SM))
+                .text_color(rgb(Palette::TEXT_TERTIARY))
+                .child(format!("Nothing matches “{search}”.")),
+        )
+        .into_any_element()
 }
 
 /// Friendly empty state with a hint tailored to the current tab.
@@ -1818,6 +1946,8 @@ fn main() {
         let app = match stored_key {
             Some(api_key) => cx.new(|cx| {
                 let focus_handle = cx.focus_handle();
+                let search = cx.new(|cx| TextInput::new("", "Search…", false, cx));
+                cx.observe(&search, |_, _, cx| cx.notify()).detach();
                 let mut app = DivisasApp {
                     client: DivisasClient::with_base_url(api_key, base_url.clone()),
                     web_api_key: web_api_key.clone(),
@@ -1832,12 +1962,15 @@ fn main() {
                     status: None,
                     drawer: None,
                     reauth_attempts: 0,
+                    search,
                 };
                 app.fetch(cx);
                 app
             }),
             None => cx.new(|cx| {
                 let focus_handle = cx.focus_handle();
+                let search = cx.new(|cx| TextInput::new("", "Search…", false, cx));
+                cx.observe(&search, |_, _, cx| cx.notify()).detach();
                 let mut app = DivisasApp {
                     client: DivisasClient::with_base_url("", base_url.clone()),
                     web_api_key: web_api_key.clone(),
@@ -1857,6 +1990,7 @@ fn main() {
                     status: None,
                     drawer: None,
                     reauth_attempts: 0,
+                    search,
                 };
                 // Guest sessions restore silently: mint a fresh key without
                 // showing the login form. Email sessions can't be silent
