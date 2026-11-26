@@ -25,7 +25,7 @@ use theme::{DOWN, DOWN_SOFT, TEXT_PRIMARY, UP};
 // Actions
 // ----------------------------------------------------------------------
 
-actions!(divisas, [Refresh, Quit, SwitchTab1, SwitchTab2, SwitchTab3, SwitchTab4, SwitchTab5, SignOut]);
+actions!(divisas, [Refresh, Quit, SwitchTab1, SwitchTab2, SwitchTab3, SwitchTab4, SwitchTab5, SwitchTab6, SignOut]);
 
 // ----------------------------------------------------------------------
 // State
@@ -38,6 +38,7 @@ enum Tab {
     Official,
     Averages,
     Remittance,
+    Calculator,
 }
 
 impl Tab {
@@ -48,15 +49,17 @@ impl Tab {
             Tab::Official => "Official",
             Tab::Averages => "Averages",
             Tab::Remittance => "Remittance",
+            Tab::Calculator => "Calculator",
         }
     }
 
-    const ALL: [Tab; 5] = [
+    const ALL: [Tab; 6] = [
         Tab::Rates,
         Tab::Banks,
         Tab::Official,
         Tab::Averages,
         Tab::Remittance,
+        Tab::Calculator,
     ];
 }
 
@@ -69,6 +72,18 @@ enum Data {
     Banks(Vec<Bank>),
     Averages(Vec<MarketAverage>),
     Remittance(Vec<RemittanceQuote>),
+    /// Latest rates for every currency of the selected country, for the
+    /// exchange calculator.
+    Calculator(Vec<RateRow>),
+}
+
+/// Direction of the exchange calculation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CalcDirection {
+    /// Foreign currency → DOP: banks buy your foreign currency.
+    ForeignToDop,
+    /// DOP → foreign currency: banks sell you foreign currency.
+    DopToForeign,
 }
 
 /// State of the right-side detail drawer for one bank.
@@ -125,6 +140,10 @@ struct DivisasApp {
     reauth_attempts: u32,
     /// Free-text search that filters the current tab's rows.
     search: Entity<TextInput>,
+    /// Calculator: amount being converted.
+    calc_amount: Entity<TextInput>,
+    /// Calculator: direction of the exchange.
+    calc_direction: CalcDirection,
 }
 
 impl DivisasApp {
@@ -176,6 +195,19 @@ impl DivisasApp {
                 Tab::Remittance => client
                     .remittance_quotes(&country, None, None, Some(10))
                     .map(|r| Data::Remittance(r.quotes)),
+                Tab::Calculator => {
+                    // Latest rates for every currency of the country, so the
+                    // calculator can convert against all of them at once.
+                    let mut rows = Vec::new();
+                    for currency in CURRENCIES {
+                        match client.rates_latest(&country, Some(currency)) {
+                            Ok(mut response) => rows.append(&mut response.rates),
+                            Err(ApiError::Api { status: 404, .. }) => {}
+                            Err(err) => return Err(err),
+                        }
+                    }
+                    Ok(Data::Calculator(rows))
+                }
             };
             match result {
                 Ok(data) => Ok(data),
@@ -717,6 +749,9 @@ impl DivisasApp {
             .on_action(cx.listener(|app, _: &SwitchTab5, _window, cx| {
                 app.set_tab(Tab::ALL[4], cx);
             }))
+            .on_action(cx.listener(|app, _: &SwitchTab6, _window, cx| {
+                app.set_tab(Tab::ALL[5], cx);
+            }))
             .on_action(cx.listener(|app, _: &SignOut, _window, cx| app.sign_out(cx)))
             .on_action(|_: &Quit, _window, cx| cx.quit())
             .bg(rgb(Palette::ROOT))
@@ -770,7 +805,7 @@ impl DivisasApp {
                                     .px_3()
                                     .text_size(px(theme::TEXT_XS))
                                     .text_color(rgb(Palette::TEXT_TERTIARY))
-                                    .child("⌘1–5 tabs · ⌘R refresh · ⌘Q quit"),
+                                    .child("⌘1–6 tabs · ⌘R refresh · ⌘Q quit"),
                             )
                             .child(
                                 div()
@@ -1203,6 +1238,7 @@ fn render_body(data: &Data, search: &str, cx: &mut Context<DivisasApp>) -> AnyEl
                 remittance_view(&filtered)
             }
         }
+        Data::Calculator(rows) => calculator_view(rows, cx),
     }
 }
 
@@ -1251,6 +1287,10 @@ fn empty_state(cx: &mut Context<DivisasApp>) -> AnyElement {
         Tab::Remittance => (
             "No remittance quotes",
             "Try a different destination country.",
+        ),
+        Tab::Calculator => (
+            "No rates to calculate with",
+            "This country has no published rates yet.",
         ),
     };
     empty_state_card(title, hint, cx)
@@ -1708,6 +1748,300 @@ fn averages_view(rows: &[MarketAverage]) -> AnyElement {
         .into_any_element()
 }
 
+/// Exchange calculator: converts an amount between the selected foreign
+/// currency and DOP using the best bank rates for the selected country.
+///
+/// - Foreign → DOP: banks *buy* your foreign currency, so the best **buy**
+///   rate (highest) pays out the most DOP.
+/// - DOP → foreign: banks *sell* you foreign currency, so the best **sell**
+///   rate (lowest) costs the least DOP.
+fn calculator_view(rows: &[RateRow], cx: &mut Context<DivisasApp>) -> AnyElement {
+    let (amount_text, direction, selected_currency, selected_country, calc_amount) = {
+        let app = cx.entity().read(cx);
+        (
+            app.calc_amount.read(cx).content.to_string(),
+            app.calc_direction,
+            app.currency(),
+            app.country(),
+            app.calc_amount.clone(),
+        )
+    };
+    let amount: f64 = amount_text.trim().parse().unwrap_or(0.0);
+
+    // Best rate per currency for the current direction.
+    let best_for = |currency: &str| -> Option<(&RateRow, f64)> {
+        let mut best: Option<(&RateRow, f64)> = None;
+        for row in rows.iter().filter(|row| row.currency == currency) {
+            let rate = match direction {
+                CalcDirection::ForeignToDop => row.buy,
+                CalcDirection::DopToForeign => row.sell,
+            };
+            let better = match &best {
+                None => true,
+                Some((_, current)) => match direction {
+                    CalcDirection::ForeignToDop => rate > *current,
+                    CalcDirection::DopToForeign => rate < *current,
+                },
+            };
+            if better {
+                best = Some((row, rate));
+            }
+        }
+        best
+    };
+
+    let convert = |rate: f64| match direction {
+        CalcDirection::ForeignToDop => amount * rate,
+        CalcDirection::DopToForeign if rate > 0.0 => amount / rate,
+        CalcDirection::DopToForeign => 0.0,
+    };
+
+    // Direction toggle segments, labeled with the selected currency.
+    let toggle = |target: CalcDirection, label: String, id: &'static str| {
+        let selected = direction == target;
+        div()
+            .id(SharedString::from(id))
+            .px_3()
+            .py_1()
+            .rounded(px(theme::RADIUS_SM))
+            .text_size(px(theme::TEXT_SM))
+            .cursor_pointer()
+            .when(selected, |this| {
+                this.bg(rgb(Palette::SURFACE))
+                    .text_color(rgb(Palette::TEXT))
+            })
+            .when(!selected, |this| {
+                this.text_color(rgb(Palette::TEXT_SECONDARY))
+                    .hover(|style| style.text_color(rgb(Palette::TEXT)))
+            })
+            .child(label)
+            .on_click(cx.listener(move |app, _event: &ClickEvent, _window, cx| {
+                app.calc_direction = target;
+                cx.notify();
+            }))
+    };
+
+    // ---------------------------------------------------------- Hero card
+    let hero_result = best_for(selected_currency)
+        .map(|(row, rate)| (convert(rate), rate, row.name.clone()))
+        .map(|(result, rate, bank)| {
+            (
+                theme::format_usd(result),
+                format!("×{rate:.4}"),
+                bank,
+            )
+        });
+
+    let hero = div()
+        .flex()
+        .flex_row()
+        .gap(px(theme::SPACE_XL))
+        .p(px(theme::SPACE_XL))
+        .rounded(px(theme::RADIUS_LG))
+        .bg(rgb(Palette::SURFACE))
+        .border_1()
+        .border_color(rgb(Palette::BORDER))
+        // Left: amount input + direction toggle.
+        .child(
+            div()
+                .w(px(260.))
+                .flex()
+                .flex_col()
+                .gap(px(theme::SPACE_MD))
+                .child(
+                    div()
+                        .text_size(px(theme::TEXT_XS))
+                        .text_color(rgb(Palette::TEXT_SECONDARY))
+                        .child("AMOUNT"),
+                )
+                .child(
+                    div()
+                        .id("calc-amount")
+                        .p_2()
+                        .rounded(px(theme::RADIUS_SM))
+                        .bg(rgb(Palette::SURFACE_SUNKEN))
+                        .border_1()
+                        .border_color(rgb(Palette::BORDER))
+                        .text_size(px(theme::TEXT_LG))
+                        .on_click(cx.listener(
+                            |app, _: &ClickEvent, window, cx| {
+                                window.focus(&app.calc_amount.read(cx).focus_handle(cx));
+                            },
+                        ))
+                        .child(calc_amount),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap_1()
+                        .p(px(theme::SPACE_XS))
+                        .rounded(px(theme::RADIUS_SM))
+                        .bg(rgb(Palette::SURFACE_SUNKEN))
+                        .child(toggle(
+                            CalcDirection::ForeignToDop,
+                            format!("{selected_currency} → DOP"),
+                            "calc-to-dop",
+                        ))
+                        .child(toggle(
+                            CalcDirection::DopToForeign,
+                            format!("DOP → {selected_currency}"),
+                            "calc-to-foreign",
+                        )),
+                ),
+        )
+        // Right: hero result.
+        .child(
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .justify_center()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(theme::TEXT_XS))
+                        .text_color(rgb(Palette::TEXT_SECONDARY))
+                        .child(match direction {
+                            CalcDirection::ForeignToDop => "YOU RECEIVE".to_string(),
+                            CalcDirection::DopToForeign => "YOU GET".to_string(),
+                        }),
+                )
+                .child(
+                    div()
+                        .text_size(px(theme::TEXT_DISPLAY))
+                        .text_color(rgb(Palette::UP))
+                        .child(
+                            hero_result
+                                .as_ref()
+                                .map(|(result, _, _)| result.clone())
+                                .unwrap_or_else(|| "—".into()),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(theme::TEXT_SM))
+                        .text_color(rgb(Palette::TEXT_SECONDARY))
+                        .child(
+                            hero_result
+                                .as_ref()
+                                .map(|(_, rate, bank)| {
+                                    format!("Best rate {rate} · via {bank}")
+                                })
+                                .unwrap_or_else(|| {
+                                    format!("No {selected_currency} rates in {selected_country}")
+                                }),
+                        ),
+                ),
+        );
+
+    // ------------------------------------------------- Per-currency table
+    let mut table = div().flex().flex_col().gap(px(theme::SPACE_XS));
+    table = table.child(
+        div()
+            .flex()
+            .flex_row()
+            .px(px(theme::SPACE_LG))
+            .py_1()
+            .text_size(px(theme::TEXT_XS))
+            .text_color(rgb(Palette::TEXT_TERTIARY))
+            .child(
+                div()
+                    .flex_1()
+                    .child(if direction == CalcDirection::ForeignToDop {
+                        "SELLING → DOP RECEIVED"
+                    } else {
+                        "BUYING ← DOP SPENT"
+                    }),
+            )
+            .child(div().w(px(90.)).child("RATE"))
+            .child(div().w(px(150.)).child("BEST BANK")),
+    );
+
+    for currency in CURRENCIES {
+        let Some((row, rate)) = best_for(currency) else {
+            continue;
+        };
+        let result = convert(rate);
+        let selected = *currency == selected_currency;
+        table = table.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .px(px(theme::SPACE_LG))
+                .py(px(theme::SPACE_SM))
+                .rounded(px(theme::RADIUS_SM))
+                .when(selected, |this| this.bg(rgb(Palette::ACCENT_SOFT)))
+                .when(!selected, |this| {
+                    this.hover(|style| style.bg(rgb(Palette::SURFACE_HOVER)))
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(px(theme::TEXT_BASE))
+                                .text_color(rgb(if selected {
+                                    Palette::ACCENT_TEXT
+                                } else {
+                                    Palette::TEXT
+                                }))
+                                .child(format!(
+                                "{}",
+                                if direction == CalcDirection::ForeignToDop {
+                                    format!("{currency} → DOP")
+                                } else {
+                                    format!("DOP → {currency}")
+                                }
+                            )),
+                        ),
+                )
+                .child(
+                    div()
+                        .w(px(120.))
+                        .text_size(px(theme::TEXT_BASE))
+                        .text_color(rgb(Palette::TEXT))
+                        .child(theme::format_usd(result)),
+                )
+                .child(
+                    div()
+                        .w(px(90.))
+                        .text_size(px(theme::TEXT_SM))
+                        .text_color(rgb(Palette::TEXT_SECONDARY))
+                        .child(format!("×{rate:.4}")),
+                )
+                .child(
+                    div()
+                        .w(px(150.))
+                        .text_size(px(theme::TEXT_SM))
+                        .text_color(rgb(Palette::TEXT_TERTIARY))
+                        .child(row.name.clone()),
+                ),
+        );
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(theme::SPACE_LG))
+        .child(hero)
+        .child(
+            div()
+                .p(px(theme::SPACE_MD))
+                .rounded(px(theme::RADIUS_MD))
+                .bg(rgb(Palette::SURFACE))
+                .border_1()
+                .border_color(rgb(Palette::BORDER))
+                .child(table),
+        )
+        .into_any_element()
+}
+
 fn remittance_view(quotes: &[RemittanceQuote]) -> AnyElement {
     // Sort by effective rate (amount received per USD sent); the best
     // payout wins. Quotes missing `amount_received` sink to the bottom.
@@ -1980,6 +2314,7 @@ fn main() {
             KeyBinding::new("cmd-3", SwitchTab3, Some("divisas")),
             KeyBinding::new("cmd-4", SwitchTab4, Some("divisas")),
             KeyBinding::new("cmd-5", SwitchTab5, Some("divisas")),
+            KeyBinding::new("cmd-6", SwitchTab6, Some("divisas")),
             KeyBinding::new("cmd-shift-s", SignOut, Some("divisas")),
         ]);
 
@@ -2003,6 +2338,8 @@ fn main() {
                 let focus_handle = cx.focus_handle();
                 let search = cx.new(|cx| TextInput::new("", "Search…", false, cx));
                 cx.observe(&search, |_, _, cx| cx.notify()).detach();
+                let calc_amount = cx.new(|cx| TextInput::new("100", "Amount", false, cx));
+                cx.observe(&calc_amount, |_, _, cx| cx.notify()).detach();
                 let mut app = DivisasApp {
                     client: DivisasClient::with_base_url(api_key, base_url.clone()),
                     web_api_key: web_api_key.clone(),
@@ -2018,6 +2355,8 @@ fn main() {
                     drawer: None,
                     reauth_attempts: 0,
                     search,
+                    calc_amount,
+                    calc_direction: CalcDirection::ForeignToDop,
                 };
                 app.fetch(cx);
                 app
@@ -2026,6 +2365,8 @@ fn main() {
                 let focus_handle = cx.focus_handle();
                 let search = cx.new(|cx| TextInput::new("", "Search…", false, cx));
                 cx.observe(&search, |_, _, cx| cx.notify()).detach();
+                let calc_amount = cx.new(|cx| TextInput::new("100", "Amount", false, cx));
+                cx.observe(&calc_amount, |_, _, cx| cx.notify()).detach();
                 let mut app = DivisasApp {
                     client: DivisasClient::with_base_url("", base_url.clone()),
                     web_api_key: web_api_key.clone(),
@@ -2046,6 +2387,8 @@ fn main() {
                     drawer: None,
                     reauth_attempts: 0,
                     search,
+                    calc_amount,
+                    calc_direction: CalcDirection::ForeignToDop,
                 };
                 // Guest sessions restore silently: mint a fresh key without
                 // showing the login form. Email sessions can't be silent
