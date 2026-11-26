@@ -78,6 +78,16 @@ enum Data {
 }
 
 /// Direction of the exchange calculation.
+/// Calculator state passed down from the app during render (reading the
+/// app entity inside a render pass would panic — GPUI forbids nested reads).
+struct CalcContext {
+    amount_text: String,
+    direction: CalcDirection,
+    currency: &'static str,
+    country: &'static str,
+    calc_amount: Entity<TextInput>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CalcDirection {
     /// Foreign currency → DOP: banks buy your foreign currency.
@@ -953,6 +963,18 @@ impl DivisasApp {
                                     .child(render_body(
                                         &self.data,
                                         &self.search.read(cx).content.to_string(),
+                                        &CalcContext {
+                                            amount_text: self
+                                                .calc_amount
+                                                .read(cx)
+                                                .content
+                                                .to_string(),
+                                            direction: self.calc_direction,
+                                            currency: self.currency(),
+                                            country: self.country(),
+                                            calc_amount: self.calc_amount.clone(),
+                                        },
+                                        self.tab,
                                         cx,
                                     )),
                             ),
@@ -1170,12 +1192,18 @@ fn render_drawer(drawer: &Drawer, cx: &mut Context<DivisasApp>) -> AnyElement {
         .into_any_element()
 }
 
-fn render_body(data: &Data, search: &str, cx: &mut Context<DivisasApp>) -> AnyElement {
+fn render_body(
+    data: &Data,
+    search: &str,
+    calc: &CalcContext,
+    tab: Tab,
+    cx: &mut Context<DivisasApp>,
+) -> AnyElement {
     // Case-insensitive substring match over the row's searchable text.
     let needle = search.to_lowercase();
     let matches = |haystack: &str| haystack.to_lowercase().contains(&needle);
     match data {
-        Data::Empty => empty_state(cx),
+        Data::Empty => empty_state(tab, cx),
         Data::Loading => skeleton_list(6),
         Data::Error(message) => error_state(message, cx),
         Data::Rates(rows) => {
@@ -1238,7 +1266,7 @@ fn render_body(data: &Data, search: &str, cx: &mut Context<DivisasApp>) -> AnyEl
                 remittance_view(&filtered)
             }
         }
-        Data::Calculator(rows) => calculator_view(rows, cx),
+        Data::Calculator(rows) => calculator_view(rows, calc, cx),
     }
 }
 
@@ -1266,8 +1294,8 @@ fn no_matches(search: &str) -> AnyElement {
 }
 
 /// Friendly empty state with a hint tailored to the current tab.
-fn empty_state(cx: &mut Context<DivisasApp>) -> AnyElement {
-    let (title, hint) = match cx.entity().read(cx).tab {
+fn empty_state(tab: Tab, cx: &mut Context<DivisasApp>) -> AnyElement {
+    let (title, hint) = match tab {
         Tab::Rates => (
             "No rates for this pair yet",
             "Try another country or currency, or check back later.",
@@ -1755,17 +1783,11 @@ fn averages_view(rows: &[MarketAverage]) -> AnyElement {
 ///   rate (highest) pays out the most DOP.
 /// - DOP → foreign: banks *sell* you foreign currency, so the best **sell**
 ///   rate (lowest) costs the least DOP.
-fn calculator_view(rows: &[RateRow], cx: &mut Context<DivisasApp>) -> AnyElement {
-    let (amount_text, direction, selected_currency, selected_country, calc_amount) = {
-        let app = cx.entity().read(cx);
-        (
-            app.calc_amount.read(cx).content.to_string(),
-            app.calc_direction,
-            app.currency(),
-            app.country(),
-            app.calc_amount.clone(),
-        )
-    };
+fn calculator_view(rows: &[RateRow], calc: &CalcContext, cx: &mut Context<DivisasApp>) -> AnyElement {
+    let amount_text = calc.amount_text.as_str();
+    let direction = calc.direction;
+    let selected_currency = calc.currency;
+    let selected_country = calc.country;
     let amount: f64 = amount_text.trim().parse().unwrap_or(0.0);
 
     // Best rate per currency for the current direction.
@@ -1868,7 +1890,7 @@ fn calculator_view(rows: &[RateRow], cx: &mut Context<DivisasApp>) -> AnyElement
                                 window.focus(&app.calc_amount.read(cx).focus_handle(cx));
                             },
                         ))
-                        .child(calc_amount),
+                        .child(calc.calc_amount.clone()),
                 )
                 .child(
                     div()
