@@ -1393,27 +1393,63 @@ fn render_drawer(drawer: &Drawer, cx: &mut Context<DivisasApp>) -> AnyElement {
         .child(
             div()
                 .flex()
-                .flex_col()
-                .gap_1()
+                .flex_row()
+                .items_center()
+                .gap(px(theme::SPACE_SM))
                 .child(
+                    // Avatar disc matching the bank cards
                     div()
-                        .text_size(px(theme::TEXT_MD))
-                        .text_color(rgb(Palette::TEXT))
-                        .child(drawer.name.clone()),
+                        .size(px(32.))
+                        .rounded_full()
+                        .bg(theme::accent_card_gradient())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(theme::TEXT_SM))
+                        .text_color(rgb(Palette::WHITE))
+                        .child(
+                            drawer
+                                .name
+                                .chars()
+                                .next()
+                                .unwrap_or('?')
+                                .to_string(),
+                        ),
                 )
                 .child(
                     div()
-                        .text_size(px(theme::TEXT_XS))
-                        .text_color(rgb(Palette::TEXT_TERTIARY))
-                        .child(drawer.currency.clone()),
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_size(px(theme::TEXT_MD))
+                                .text_color(rgb(Palette::TEXT))
+                                .child(drawer.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .child(
+                                    div()
+                                        .px_2()
+                                        .py(px(2.))
+                                        .rounded(px(theme::RADIUS_SM))
+                                        .bg(rgb(Palette::ACCENT_SOFT))
+                                        .text_size(px(theme::TEXT_XS))
+                                        .text_color(rgb(Palette::ACCENT_TEXT))
+                                        .child(drawer.currency.clone()),
+                                ),
+                        ),
                 ),
         )
         .child(
             div()
                 .id("drawer-close")
-                .px_2()
-                .py_1()
+                .size(px(26.))
                 .rounded(px(theme::RADIUS_SM))
+                .flex()
+                .items_center()
+                .justify_center()
                 .text_size(px(theme::TEXT_SM))
                 .text_color(rgb(Palette::TEXT_SECONDARY))
                 .cursor_pointer()
@@ -1445,16 +1481,24 @@ fn render_drawer(drawer: &Drawer, cx: &mut Context<DivisasApp>) -> AnyElement {
                             .flex_row()
                             .justify_between()
                             .items_center()
-                            .p(px(theme::SPACE_MD))
-                            .rounded(px(theme::RADIUS_SM))
+                            .px(px(theme::SPACE_MD))
+                            .py(px(theme::SPACE_SM))
+                            .rounded(px(theme::RADIUS_MD))
                             .bg(rgb(Palette::SURFACE))
                             .border_1()
                             .border_color(rgb(Palette::BORDER))
                             .child(
                                 div()
-                                    .text_size(px(theme::TEXT_SM))
-                                    .text_color(rgb(Palette::TEXT_SECONDARY))
-                                    .child(rate.currency.clone()),
+                                    .child(
+                                        div()
+                                            .px_2()
+                                            .py(px(2.))
+                                            .rounded(px(theme::RADIUS_SM))
+                                            .bg(rgb(Palette::ACCENT_SOFT))
+                                            .text_size(px(theme::TEXT_XS))
+                                            .text_color(rgb(Palette::ACCENT_TEXT))
+                                            .child(rate.currency.clone()),
+                                    ),
                             )
                             .child(
                                 div()
@@ -1463,15 +1507,39 @@ fn render_drawer(drawer: &Drawer, cx: &mut Context<DivisasApp>) -> AnyElement {
                                     .gap(px(theme::SPACE_LG))
                                     .child(
                                         div()
-                                            .text_size(px(theme::TEXT_BASE))
-                                            .text_color(rgb(Palette::UP))
-                                            .child(format!("buy {}", theme::format_rate(rate.buy))),
+                                            .flex()
+                                            .flex_col()
+                                            .items_end()
+                                            .child(
+                                                div()
+                                                    .text_size(px(theme::TEXT_BASE))
+                                                    .text_color(rgb(Palette::UP))
+                                                    .child(theme::format_rate(rate.buy)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(theme::TEXT_XS))
+                                                    .text_color(rgb(Palette::TEXT_TERTIARY))
+                                                    .child("buy"),
+                                            ),
                                     )
                                     .child(
                                         div()
-                                            .text_size(px(theme::TEXT_BASE))
-                                            .text_color(rgb(Palette::DOWN))
-                                            .child(format!("sell {}", theme::format_rate(rate.sell))),
+                                            .flex()
+                                            .flex_col()
+                                            .items_end()
+                                            .child(
+                                                div()
+                                                    .text_size(px(theme::TEXT_BASE))
+                                                    .text_color(rgb(Palette::DOWN))
+                                                    .child(theme::format_rate(rate.sell)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(theme::TEXT_XS))
+                                                    .text_color(rgb(Palette::TEXT_TERTIARY))
+                                                    .child("sell"),
+                                            ),
                                     ),
                             ),
                     );
@@ -1487,6 +1555,7 @@ fn render_drawer(drawer: &Drawer, cx: &mut Context<DivisasApp>) -> AnyElement {
                         .child("No recent history available."),
                 );
             } else {
+                // Reuse the main chart component, sized for the drawer.
                 let mut history_section = div().flex().flex_col().gap(px(theme::SPACE_SM));
                 history_section = history_section.child(
                     div()
@@ -1494,31 +1563,12 @@ fn render_drawer(drawer: &Drawer, cx: &mut Context<DivisasApp>) -> AnyElement {
                         .text_color(rgb(Palette::TEXT_SECONDARY))
                         .child("RECENT HISTORY"),
                 );
-                for point in history.iter().rev().take(10) {
-                    let date = point.date.clone().unwrap_or_else(|| "—".into());
-                    let buy = point
-                        .rates
-                        .iter()
-                        .find(|rate| rate.currency == drawer.currency)
-                        .map(|rate| theme::format_rate(rate.buy));
-                    history_section = history_section.child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .justify_between()
-                            .text_size(px(theme::TEXT_SM))
-                            .child(
-                                div()
-                                    .text_color(rgb(Palette::TEXT_SECONDARY))
-                                    .child(theme::short_date(&date)),
-                            )
-                            .child(
-                                div()
-                                    .text_color(rgb(Palette::TEXT))
-                                    .child(buy.unwrap_or_else(|| "—".into())),
-                            ),
-                    );
-                }
+                history_section = history_section.child(history_chart(
+                    history,
+                    &drawer.currency,
+                    &drawer.name,
+                    160.,
+                ));
                 section = section.child(history_section);
             }
 
