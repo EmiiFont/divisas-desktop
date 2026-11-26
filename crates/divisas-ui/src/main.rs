@@ -350,6 +350,43 @@ impl Render for DivisasApp {
     }
 }
 
+/// Freshest `lastUpdated`-style timestamp across the current data variant.
+fn freshest_updated(data: &Data) -> Option<String> {
+    let mut freshest: Option<String> = None;
+    let mut consider = |candidate: Option<&String>| {
+        if let Some(ts) = candidate {
+            if freshest
+                .as_ref()
+                .and_then(|current| theme::minutes_since(current))
+                .map_or(true, |current_min| {
+                    theme::minutes_since(ts)
+                        .map_or(false, |candidate_min| candidate_min < current_min)
+                })
+            {
+                freshest = Some(ts.clone());
+            }
+        }
+    };
+    match data {
+        Data::Rates(rows) => rows.iter().for_each(|row| consider(row.last_updated.as_ref())),
+        Data::Banks(banks) => banks
+            .iter()
+            .for_each(|bank| consider(bank.last_updated.as_ref())),
+        Data::Remittance(quotes) => quotes
+            .iter()
+            .for_each(|quote| consider(quote.last_updated.as_ref())),
+        _ => {}
+    }
+    freshest
+}
+
+/// "Updated 3 min ago" plus a stale flag when data is older than 30 min.
+fn updated_label(data: &Data) -> Option<(bool, String)> {
+    let iso = freshest_updated(data)?;
+    let minutes = theme::minutes_since(&iso)?;
+    Some((theme::is_stale(minutes), theme::time_ago(minutes)))
+}
+
 impl DivisasApp {
     fn render_login(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let Screen::Login { email, password, error, busy } = &self.screen else {
@@ -721,6 +758,31 @@ impl DivisasApp {
                             .border_color(rgb(Palette::BORDER))
                             .text_size(px(theme::TEXT_XS))
                             .text_color(rgb(Palette::TEXT_TERTIARY))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(theme::SPACE_SM))
+                            // Stale-data indicator: green "fresh" dot, amber when > 30 min.
+                            .children(updated_label(&self.data).map(|(stale, label)| {
+                                let dot = if stale { Palette::WARN } else { Palette::UP };
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(theme::SPACE_XS))
+                                    .text_color(rgb(if stale {
+                                        Palette::WARN
+                                    } else {
+                                        Palette::TEXT_SECONDARY
+                                    }))
+                                    .child(
+                                        div()
+                                            .size(px(7.))
+                                            .rounded_full()
+                                            .bg(rgb(dot)),
+                                    )
+                                    .child(format!("Updated {label}"))
+                            }))
                             .child(self.status.clone().unwrap_or_else(|| {
                                 format!("{country} · {currency} · divisas-cloud API").into()
                             })),
@@ -904,7 +966,7 @@ fn render_drawer(drawer: &Drawer, cx: &mut Context<DivisasApp>) -> AnyElement {
 fn render_body(data: &Data, cx: &mut Context<DivisasApp>) -> AnyElement {
     match data {
         Data::Empty => message("No data. Press Refresh."),
-        Data::Loading => message("Loading…"),
+        Data::Loading => skeleton_list(6),
         Data::Error(message) => message_box(message, DOWN_SOFT, DOWN),
         Data::Rates(rows) => rates_view(rows, cx),
         Data::Banks(banks) => banks_view(banks),
@@ -1338,6 +1400,59 @@ fn message(text: &str) -> AnyElement {
         .text_size(px(theme::TEXT_BASE))
         .text_color(rgb(Palette::TEXT_TERTIARY))
         .child(text.to_string())
+        .into_any_element()
+}
+
+/// Pulsing placeholder card used while data is loading.
+fn skeleton_card() -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(theme::SPACE_LG))
+        .p(px(theme::SPACE_LG))
+        .rounded(px(theme::RADIUS_MD))
+        .bg(rgb(Palette::SURFACE))
+        .border_1()
+        .border_color(rgb(Palette::BORDER))
+        .child(
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .w(px(140.))
+                        .h(px(12.))
+                        .rounded(px(theme::RADIUS_SM))
+                        .bg(rgb(Palette::SURFACE_HOVER)),
+                )
+                .child(
+                    div()
+                        .w(px(80.))
+                        .h(px(9.))
+                        .rounded(px(theme::RADIUS_SM))
+                        .bg(rgb(Palette::SURFACE_SUNKEN)),
+                ),
+        )
+        .child(
+            div()
+                .w(px(64.))
+                .h(px(18.))
+                .rounded(px(theme::RADIUS_SM))
+                .bg(rgb(Palette::SURFACE_HOVER)),
+        )
+        .into_any_element()
+}
+
+/// Stack of skeleton cards shown while fetching.
+fn skeleton_list(count: usize) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(theme::SPACE_MD))
+        .children((0..count).map(|_| skeleton_card()).collect::<Vec<_>>())
         .into_any_element()
 }
 

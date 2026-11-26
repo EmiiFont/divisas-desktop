@@ -177,6 +177,55 @@ impl Direction {
     }
 }
 
+/// Minutes since an ISO-8601 UTC timestamp, if parseable. Used for staleness.
+pub fn minutes_since(iso: &str) -> Option<u64> {
+    // Minimal ISO-8601 (UTC) parse: YYYY-MM-DDTHH:MM:SS(.sss)(Z|+00:00)
+    let bytes = iso.as_bytes();
+    if bytes.len() < 19 || bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b'T' {
+        return None;
+    }
+    let year: i64 = iso.get(0..4)?.parse().ok()?;
+    let month: i64 = iso.get(5..7)?.parse().ok()?;
+    let day: i64 = iso.get(8..10)?.parse().ok()?;
+    let hour: i64 = iso.get(11..13)?.parse().ok()?;
+    let minute: i64 = iso.get(14..16)?.parse().ok()?;
+    let second: i64 = iso.get(17..19)?.parse().ok()?;
+
+    let days = days_from_civil(year, month, day);
+    let timestamp = days * 86_400 + hour * 3600 + minute * 60 + second;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    Some((now - timestamp).max(0) as u64)
+}
+
+/// Howard Hinnant's days_from_civil algorithm.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Human-readable "time ago" string.
+pub fn time_ago(minutes: u64) -> String {
+    match minutes {
+        0..=1 => "just now".into(),
+        2..=59 => format!("{minutes} min ago"),
+        60..=1439 => format!("{} h ago", minutes / 60),
+        1440..=43199 => format!("{} d ago", minutes / 1440),
+        _ => format!("{} mo ago", minutes / 43200),
+    }
+}
+
+/// True if data is older than 30 minutes.
+pub fn is_stale(minutes: u64) -> bool {
+    minutes > 30
+}
+
 #[allow(dead_code)]
 fn unused_hsla(_: Hsla) {
     let _ = Hsla {
