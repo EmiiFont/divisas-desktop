@@ -5,7 +5,7 @@
 //! via `POST /v1/keys`, and stores it in the OS keychain. Later launches load
 //! the key straight from the keychain (or `DIVISAS_API_KEY`).
 
-mod keychain;
+mod session;
 mod text_input;
 mod theme;
 
@@ -100,9 +100,19 @@ enum Screen {
     Main,
 }
 
+/// How the current session was authenticated. Guest sessions can be
+/// restored silently; email sessions cannot (we never store passwords).
+#[derive(Clone, Copy, PartialEq)]
+enum AuthMethod {
+    Email,
+    Anonymous,
+}
+
 struct DivisasApp {
     client: DivisasClient,
     web_api_key: String,
+    base_url: String,
+    auth_method: AuthMethod,
     focus_handle: FocusHandle,
     screen: Screen,
     tab: Tab,
@@ -111,6 +121,8 @@ struct DivisasApp {
     data: Data,
     status: Option<SharedString>,
     drawer: Option<Drawer>,
+    /// Guards against re-auth loops when the API keeps rejecting the key.
+    reauth_attempts: u32,
 }
 
 impl DivisasApp {
@@ -165,10 +177,12 @@ impl DivisasApp {
             };
             match result {
                 Ok(data) => Ok(data),
-                Err(ApiError::Api { status, code, message }) => Err(format!(
-                    "HTTP {status} — {code}: {message}"
-                )),
-                Err(err) => Err(err.to_string()),
+                Err(ApiError::Api { status, code, message }) => Err(ApiError::Api {
+                    status,
+                    code,
+                    message,
+                }),
+                Err(err) => Err(err),
             }
         });
 
@@ -176,10 +190,16 @@ impl DivisasApp {
             let result = task.await;
             this.update(cx, |app, cx| {
                 app.status = None;
-                app.data = match result {
-                    Ok(data) => data,
-                    Err(message) => Data::Error(message),
-                };
+                match &result {
+                    Ok(data) => {
+                        app.reauth_attempts = 0;
+                        app.data = data.clone();
+                    }
+                    // A rejected key is a session problem, not a data problem:
+                    // silently re-authenticate (guest) or return to login.
+                    Err(ApiError::Api { status: 401, .. }) => app.silent_reauth(cx),
+                    Err(err) => app.data = Data::Error(err.to_string()),
+                }
                 cx.notify();
             })
             .ok();
@@ -203,6 +223,7 @@ impl DivisasApp {
             return;
         }
         let web_api_key = self.web_api_key.clone();
+        self.auth_method = AuthMethod::Email;
 
         *busy = true;
         cx.notify();
@@ -231,6 +252,7 @@ impl DivisasApp {
             return;
         }
         *busy = true;
+        self.auth_method = AuthMethod::Anonymous;
         cx.notify();
 
         let client = self.client.clone();
@@ -250,31 +272,86 @@ impl DivisasApp {
     }
 
     fn finish_sign_in(&mut self, result: Result<ApiKeyIssued, ApiError>, cx: &mut Context<Self>) {
-        let Screen::Login { error, busy, .. } = &mut self.screen else {
-            return;
-        };
-        *busy = false;
         match result {
             Ok(issued) => {
-                if let Err(err) = keychain::save_api_key(&issued.api_key) {
-                    *error = Some(format!("Signed in, but could not store key: {err}"));
-                } else {
-                    self.client = DivisasClient::with_base_url(
-                        issued.api_key,
-                        divisas_api::DEFAULT_BASE_URL,
-                    );
-                    self.screen = Screen::Main;
-                    self.fetch(cx);
+                if let Err(err) = session::save_api_key(&issued.api_key) {
+                    self.status = Some(format!("Signed in, but could not store key: {err}").into());
                 }
+                session::save_auth_method(match self.auth_method {
+                    AuthMethod::Email => "email",
+                    AuthMethod::Anonymous => "anonymous",
+                });
+                self.client = DivisasClient::with_base_url(issued.api_key, self.base_url.clone());
+                self.reauth_attempts = 0;
+                self.screen = Screen::Main;
+                self.fetch(cx);
             }
             Err(ApiError::Api { status, code, message }) => {
-                *error = Some(format!("HTTP {status} — {code}: {message}"));
+                if let Screen::Login { error, busy, .. } = &mut self.screen {
+                    *busy = false;
+                    *error = Some(format!("HTTP {status} — {code}: {message}"));
+                }
             }
             Err(err) => {
-                *error = Some(err.to_string());
+                if let Screen::Login { error, busy, .. } = &mut self.screen {
+                    *busy = false;
+                    *error = Some(err.to_string());
+                }
             }
         }
         cx.notify();
+    }
+
+    /// Issue a fresh key without user input (guest sessions only) and retry.
+    fn silent_reauth(&mut self, cx: &mut Context<Self>) {
+        if self.auth_method != AuthMethod::Anonymous || self.reauth_attempts >= 2 {
+            // Email sessions need the password; fall back to the login screen.
+            if let Screen::Main = self.screen {
+                self.screen = Screen::Login {
+                    email: cx.new(|cx| TextInput::new("", "email@example.com", false, cx)),
+                    password: cx.new(|cx| TextInput::new("", "password", true, cx)),
+                    error: Some("Session expired. Sign in again.".into()),
+                    busy: false,
+                };
+            }
+            cx.notify();
+            return;
+        }
+        self.reauth_attempts += 1;
+        self.status = Some("Restoring session…".into());
+        let client = self.client.clone();
+        let web_api_key = self.web_api_key.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { client.sign_in_anonymous_and_issue_key(&web_api_key) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |app, cx| {
+                app.status = None;
+                match result {
+                    Ok(issued) => {
+                        let _ = session::save_api_key(&issued.api_key);
+                        session::save_auth_method("anonymous");
+                        app.client = DivisasClient::with_base_url(
+                            issued.api_key,
+                            app.base_url.clone(),
+                        );
+                        app.fetch(cx);
+                    }
+                    Err(_) => {
+                        app.screen = Screen::Login {
+                            email: cx.new(|cx| TextInput::new("", "email@example.com", false, cx)),
+                            password: cx.new(|cx| TextInput::new("", "password", true, cx)),
+                            error: Some("Session expired. Sign in again.".into()),
+                            busy: false,
+                        };
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn set_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
@@ -1498,18 +1575,22 @@ fn main() {
         let base_url = std::env::var("DIVISAS_API_BASE_URL")
             .unwrap_or(divisas_api::DEFAULT_BASE_URL.into());
 
-        // Prefer an env-provided key, then the keychain; otherwise show login.
+        // Prefer an env-provided key, then the stored session; otherwise
+        // restore a guest session silently or show login.
         let stored_key = std::env::var("DIVISAS_API_KEY")
             .ok()
             .filter(|key| !key.is_empty())
-            .or_else(keychain::load_api_key);
+            .or_else(session::load_api_key);
+        let last_method = session::load_auth_method();
 
         let app = match stored_key {
             Some(api_key) => cx.new(|cx| {
                 let focus_handle = cx.focus_handle();
                 let mut app = DivisasApp {
-                    client: DivisasClient::with_base_url(api_key, base_url),
-                    web_api_key,
+                    client: DivisasClient::with_base_url(api_key, base_url.clone()),
+                    web_api_key: web_api_key.clone(),
+                    base_url,
+                    auth_method: AuthMethod::Email,
                     focus_handle,
                     screen: Screen::Main,
                     tab: Tab::Rates,
@@ -1518,20 +1599,22 @@ fn main() {
                     data: Data::Empty,
                     status: None,
                     drawer: None,
+                    reauth_attempts: 0,
                 };
                 app.fetch(cx);
                 app
-            }),            None => cx.new(|cx| {
+            }),
+            None => cx.new(|cx| {
                 let focus_handle = cx.focus_handle();
-                let email = cx.new(|cx| TextInput::new("", "email@example.com", false, cx));
-                let password = cx.new(|cx| TextInput::new("", "password", true, cx));
-                DivisasApp {
-                    client: DivisasClient::with_base_url("", base_url),
-                    web_api_key,
+                let mut app = DivisasApp {
+                    client: DivisasClient::with_base_url("", base_url.clone()),
+                    web_api_key: web_api_key.clone(),
+                    base_url,
+                    auth_method: AuthMethod::Email,
                     focus_handle,
                     screen: Screen::Login {
-                        email,
-                        password,
+                        email: cx.new(|cx| TextInput::new("", "email@example.com", false, cx)),
+                        password: cx.new(|cx| TextInput::new("", "password", true, cx)),
                         error: None,
                         busy: false,
                     },
@@ -1541,7 +1624,15 @@ fn main() {
                     data: Data::Empty,
                     status: None,
                     drawer: None,
+                    reauth_attempts: 0,
+                };
+                // Guest sessions restore silently: mint a fresh key without
+                // showing the login form. Email sessions can't be silent
+                // (we never store passwords), so show the login screen.
+                if last_method.as_deref() != Some("email") {
+                    app.sign_in_anonymous(cx);
                 }
+                app
             }),
         };
 
