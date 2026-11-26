@@ -16,10 +16,10 @@ use gpui::{
 };
 use gpui::Rgba;
 
-use divisas_api::{ApiKeyIssued, ApiError, Bank, COUNTRIES, CURRENCIES, DivisasClient, MarketAverage, RateRow, RemittanceQuote, flatten_averages};
+use divisas_api::{ApiKeyIssued, ApiError, Bank, COUNTRIES, CURRENCIES, DivisasClient, HistoryPoint, MarketAverage, RateRow, RemittanceQuote, flatten_averages};
 use text_input::TextInput;
 use theme::Palette;
-use theme::{DOWN, TEXT_PRIMARY, UP};
+use theme::{DOWN, DOWN_SOFT, TEXT_PRIMARY, UP};
 
 // ----------------------------------------------------------------------
 // Actions
@@ -71,6 +71,24 @@ enum Data {
     Remittance(Vec<RemittanceQuote>),
 }
 
+/// State of the right-side detail drawer for one bank.
+struct Drawer {
+    key: String,
+    name: String,
+    currency: String,
+    state: DrawerState,
+}
+
+#[allow(dead_code)]
+enum DrawerState {
+    Loading,
+    Error(String),
+    Ready {
+        detail: Option<Bank>,
+        history: Vec<HistoryPoint>,
+    },
+}
+
 enum Screen {
     /// Asking for credentials; `error` shown on failure, `busy` while signing in.
     Login {
@@ -92,6 +110,7 @@ struct DivisasApp {
     currency: usize,
     data: Data,
     status: Option<SharedString>,
+    drawer: Option<Drawer>,
 }
 
 impl DivisasApp {
@@ -271,6 +290,48 @@ impl DivisasApp {
     fn set_currency(&mut self, index: usize, cx: &mut Context<Self>) {
         self.currency = index;
         self.fetch(cx);
+    }
+
+    /// Open the bank detail drawer and fetch detail + history in background.
+    fn open_drawer(&mut self, key: String, name: String, cx: &mut Context<Self>) {
+        let currency = self.currency().to_string();
+        self.drawer = Some(Drawer {
+            key: key.clone(),
+            name,
+            currency: currency.clone(),
+            state: DrawerState::Loading,
+        });
+        cx.notify();
+
+        let client = self.client.clone();
+        let key_for_fetch = key.clone();
+        let task = cx.background_executor().spawn(async move {
+            let detail = client.bank_detail(&key_for_fetch).ok();
+            let history = client
+                .rates_history(&key_for_fetch, None, None)
+                .map(|response| response.points)
+                .unwrap_or_default();
+            (detail, history)
+        });
+
+        cx.spawn(async move |this, cx| {
+            let (detail, history) = task.await;
+            this.update(cx, |app, cx| {
+                if let Some(drawer) = &mut app.drawer {
+                    if drawer.key == key {
+                        drawer.state = DrawerState::Ready { detail, history };
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn close_drawer(&mut self, cx: &mut Context<Self>) {
+        self.drawer = None;
+        cx.notify();
     }
 }
 
@@ -649,7 +710,7 @@ impl DivisasApp {
                             .child(
                                 div()
                                     .max_w(px(880.))
-                                    .child(render_body(&self.data)),
+                                    .child(render_body(&self.data, cx)),
                             ),
                     )
                     .child(
@@ -665,15 +726,187 @@ impl DivisasApp {
                             })),
                     ),
             )
+            // ------------------------------------------------ Detail drawer
+            .children(
+                self.drawer
+                    .as_ref()
+                    .map(|drawer| render_drawer(drawer, cx))
+                    .into_iter(),
+            )
     }
 }
 
-fn render_body(data: &Data) -> AnyElement {
+/// Right-side drawer showing bank detail + rate history.
+fn render_drawer(drawer: &Drawer, cx: &mut Context<DivisasApp>) -> AnyElement {
+    let header = div()
+        .flex()
+        .flex_row()
+        .justify_between()
+        .items_center()
+        .px(px(theme::SPACE_LG))
+        .py(px(theme::SPACE_LG))
+        .border_b_1()
+        .border_color(rgb(Palette::BORDER))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(theme::TEXT_MD))
+                        .text_color(rgb(Palette::TEXT))
+                        .child(drawer.name.clone()),
+                )
+                .child(
+                    div()
+                        .text_size(px(theme::TEXT_XS))
+                        .text_color(rgb(Palette::TEXT_TERTIARY))
+                        .child(drawer.currency.clone()),
+                ),
+        )
+        .child(
+            div()
+                .id("drawer-close")
+                .px_2()
+                .py_1()
+                .rounded(px(theme::RADIUS_SM))
+                .text_size(px(theme::TEXT_SM))
+                .text_color(rgb(Palette::TEXT_SECONDARY))
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(Palette::SURFACE_HOVER)))
+                .child("✕")
+                .on_click(cx.listener(|app, _event: &ClickEvent, _window, cx| {
+                    app.close_drawer(cx);
+                })),
+        );
+
+    let body: AnyElement = match &drawer.state {
+        DrawerState::Loading => message("Loading bank detail…"),
+        DrawerState::Error(message_text) => message_box(message_text, DOWN_SOFT, DOWN),
+        DrawerState::Ready { detail, history } => {
+            let mut section = div().flex().flex_col().gap(px(theme::SPACE_LG)).p(px(theme::SPACE_LG));
+
+            if let Some(bank) = detail {
+                let mut rates_section = div().flex().flex_col().gap(px(theme::SPACE_SM));
+                rates_section = rates_section.child(
+                    div()
+                        .text_size(px(theme::TEXT_XS))
+                        .text_color(rgb(Palette::TEXT_SECONDARY))
+                        .child("CURRENT RATES"),
+                );
+                for rate in &bank.rates {
+                    rates_section = rates_section.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .justify_between()
+                            .items_center()
+                            .p(px(theme::SPACE_MD))
+                            .rounded(px(theme::RADIUS_SM))
+                            .bg(rgb(Palette::SURFACE))
+                            .border_1()
+                            .border_color(rgb(Palette::BORDER))
+                            .child(
+                                div()
+                                    .text_size(px(theme::TEXT_SM))
+                                    .text_color(rgb(Palette::TEXT_SECONDARY))
+                                    .child(rate.currency.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap(px(theme::SPACE_LG))
+                                    .child(
+                                        div()
+                                            .text_size(px(theme::TEXT_BASE))
+                                            .text_color(rgb(Palette::UP))
+                                            .child(format!("buy {}", theme::format_rate(rate.buy))),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(theme::TEXT_BASE))
+                                            .text_color(rgb(Palette::DOWN))
+                                            .child(format!("sell {}", theme::format_rate(rate.sell))),
+                                    ),
+                            ),
+                    );
+                }
+                section = section.child(rates_section);
+            }
+
+            if history.is_empty() {
+                section = section.child(
+                    div()
+                        .text_size(px(theme::TEXT_SM))
+                        .text_color(rgb(Palette::TEXT_TERTIARY))
+                        .child("No recent history available."),
+                );
+            } else {
+                let mut history_section = div().flex().flex_col().gap(px(theme::SPACE_SM));
+                history_section = history_section.child(
+                    div()
+                        .text_size(px(theme::TEXT_XS))
+                        .text_color(rgb(Palette::TEXT_SECONDARY))
+                        .child("RECENT HISTORY"),
+                );
+                for point in history.iter().rev().take(10) {
+                    let date = point.date.clone().unwrap_or_else(|| "—".into());
+                    let buy = point
+                        .rates
+                        .iter()
+                        .find(|rate| rate.currency == drawer.currency)
+                        .map(|rate| theme::format_rate(rate.buy));
+                    history_section = history_section.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .justify_between()
+                            .text_size(px(theme::TEXT_SM))
+                            .child(
+                                div()
+                                    .text_color(rgb(Palette::TEXT_SECONDARY))
+                                    .child(theme::short_date(&date)),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(Palette::TEXT))
+                                    .child(buy.unwrap_or_else(|| "—".into())),
+                            ),
+                    );
+                }
+                section = section.child(history_section);
+            }
+
+            section.into_any_element()
+        }
+    };
+
+    div()
+        .w(px(340.))
+        .flex()
+        .flex_col()
+        .bg(rgb(Palette::SIDEBAR))
+        .border_l_1()
+        .border_color(rgb(Palette::BORDER))
+        .child(header)
+        .child(
+            div()
+                .id("drawer-body")
+                .flex_1()
+                .overflow_y_scroll()
+                .child(body),
+        )
+        .into_any_element()
+}
+
+fn render_body(data: &Data, cx: &mut Context<DivisasApp>) -> AnyElement {
     match data {
         Data::Empty => message("No data. Press Refresh."),
         Data::Loading => message("Loading…"),
-        Data::Error(message) => message_box(message, rgb(Palette::DOWN_SOFT), rgb(Palette::DOWN)),
-        Data::Rates(rows) => rates_view(rows),
+        Data::Error(message) => message_box(message, DOWN_SOFT, DOWN),
+        Data::Rates(rows) => rates_view(rows, cx),
         Data::Banks(banks) => banks_view(banks),
         Data::Averages(rows) => averages_view(rows),
         Data::Remittance(quotes) => remittance_view(quotes),
@@ -707,7 +940,7 @@ fn metric_tile(label: &str, value: String, color: Rgba) -> AnyElement {
         .into_any_element()
 }
 
-fn rates_view(rows: &[RateRow]) -> AnyElement {
+fn rates_view(rows: &[RateRow], cx: &mut Context<DivisasApp>) -> AnyElement {
     let best_buy = rows.iter().map(|r| r.buy).fold(f64::NEG_INFINITY, f64::max);
     let best_sell = rows.iter().map(|r| r.sell).fold(f64::INFINITY, f64::min);
     let avg_buy = if rows.is_empty() {
@@ -746,7 +979,16 @@ fn rates_view(rows: &[RateRow]) -> AnyElement {
                         .map(|row| {
                             let direction = theme::parse_direction(row.buy_change.as_deref());
                             let is_best = row.buy == best_buy && rows.len() > 1;
-                            rate_card(row, direction, is_best)
+                            let key = row.key.clone();
+                            let name = row.name.clone();
+                            rate_card(
+                                row,
+                                direction,
+                                is_best,
+                                cx.listener(move |app, _event: &ClickEvent, _window, cx| {
+                                    app.open_drawer(key.clone(), name.clone(), cx);
+                                }),
+                            )
                         })
                         .collect::<Vec<_>>(),
                 ),
@@ -754,8 +996,16 @@ fn rates_view(rows: &[RateRow]) -> AnyElement {
         .into_any_element()
 }
 
-fn rate_card(row: &RateRow, direction: theme::Direction, is_best: bool) -> AnyElement {
+fn rate_card(
+    row: &RateRow,
+    direction: theme::Direction,
+    is_best: bool,
+    on_open: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
     div()
+        .id(SharedString::from(format!("rate-{}", row.key)))
+        .cursor_pointer()
+        .on_click(on_open)
         .flex()
         .flex_row()
         .items_center()
@@ -1141,6 +1391,7 @@ fn main() {
                     currency: 0,
                     data: Data::Empty,
                     status: None,
+                    drawer: None,
                 };
                 app.fetch(cx);
                 app
@@ -1163,6 +1414,7 @@ fn main() {
                     currency: 0,
                     data: Data::Empty,
                     status: None,
+                    drawer: None,
                 }
             }),
         };
