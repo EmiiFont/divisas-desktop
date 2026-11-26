@@ -7,15 +7,19 @@
 
 mod keychain;
 mod text_input;
+mod theme;
 
 use gpui::{
     AnyElement, App, AppContext, Application, Bounds, ClickEvent, Context, Entity, FocusHandle,
     Focusable, KeyBinding, Render, SharedString, TitlebarOptions, Window, WindowBounds,
     WindowOptions, actions, div, prelude::*, px, rgb, size, white,
 };
+use gpui::Rgba;
 
 use divisas_api::{ApiKeyIssued, ApiError, Bank, COUNTRIES, CURRENCIES, DivisasClient, MarketAverage, RateRow, RemittanceQuote, flatten_averages};
 use text_input::TextInput;
+use theme::Palette;
+use theme::{DOWN, TEXT_PRIMARY, UP};
 
 // ----------------------------------------------------------------------
 // Actions
@@ -421,67 +425,24 @@ impl DivisasApp {
         let country = self.country();
         let currency = self.currency();
 
-        let country_chips = COUNTRIES
-            .iter()
-            .enumerate()
-            .map(|(index, code)| {
-                let selected = index == self.country;
-                div()
-                    .id(SharedString::from(format!("country-{code}")))
-                    .px_3()
-                    .py_1()
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .text_size(px(12.))
-                    .when(selected, |this| this.bg(rgb(0x2563EB)).text_color(white()))
-                    .when(!selected, |this| {
-                        this.bg(rgb(0x1F2937)).text_color(rgb(0x9CA3AF))
-                    })
-                    .child(*code)
-                    .on_click(cx.listener(move |app, _event: &ClickEvent, _window, cx| {
-                        app.set_country(index, cx);
-                    }))
-            })
-            .collect::<Vec<_>>();
-
-        let currency_chips = CURRENCIES
-            .iter()
-            .enumerate()
-            .map(|(index, code)| {
-                let selected = index == self.currency;
-                div()
-                    .id(SharedString::from(format!("currency-{code}")))
-                    .px_3()
-                    .py_1()
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .text_size(px(12.))
-                    .when(selected, |this| this.bg(rgb(0x2563EB)).text_color(white()))
-                    .when(!selected, |this| {
-                        this.bg(rgb(0x1F2937)).text_color(rgb(0x9CA3AF))
-                    })
-                    .child(*code)
-                    .on_click(cx.listener(move |app, _event: &ClickEvent, _window, cx| {
-                        app.set_currency(index, cx);
-                    }))
-            })
-            .collect::<Vec<_>>();
-
-        let tab_bar = Tab::ALL
+        // Sidebar navigation
+        let nav_items = Tab::ALL
             .map(|candidate| {
                 let selected = candidate == tab;
                 div()
-                    .id(SharedString::from(format!("tab-{}", candidate.label())))
-                    .px_4()
+                    .id(SharedString::from(format!("nav-{}", candidate.label())))
+                    .px_3()
                     .py_2()
+                    .rounded(px(theme::RADIUS_SM))
                     .cursor_pointer()
-                    .text_size(px(13.))
+                    .text_size(px(theme::TEXT_BASE))
                     .when(selected, |this| {
-                        this.text_color(white())
-                            .border_b_2()
-                            .border_color(rgb(0x2563EB))
+                        this.bg(rgb(Palette::ACCENT_SOFT)).text_color(rgb(Palette::ACCENT_TEXT))
                     })
-                    .when(!selected, |this| this.text_color(rgb(0x9CA3AF)))
+                    .when(!selected, |this| {
+                        this.text_color(rgb(Palette::TEXT_SECONDARY))
+                            .hover(|style| style.bg(rgb(Palette::SURFACE_HOVER)))
+                    })
                     .child(candidate.label())
                     .on_click(cx.listener(move |app, _event: &ClickEvent, _window, cx| {
                         app.set_tab(candidate, cx);
@@ -490,122 +451,219 @@ impl DivisasApp {
             .into_iter()
             .collect::<Vec<_>>();
 
+        // Segmented country switcher
+        let country_segments = COUNTRIES
+            .iter()
+            .enumerate()
+            .map(|(index, code)| {
+                let selected = index == self.country;
+                div()
+                    .id(SharedString::from(format!("country-{code}")))
+                    .px_3()
+                    .py_1()
+                    .rounded(px(theme::RADIUS_SM))
+                    .cursor_pointer()
+                    .text_size(px(theme::TEXT_SM))
+                    .when(selected, |this| {
+                        this.bg(rgb(Palette::ACCENT_SOFT)).text_color(rgb(Palette::ACCENT_TEXT))
+                    })
+                    .when(!selected, |this| {
+                        this.text_color(rgb(Palette::TEXT_SECONDARY))
+                            .hover(|style| style.bg(rgb(Palette::SURFACE_HOVER)))
+                    })
+                    .child(*code)
+                    .on_click(cx.listener(move |app, _event: &ClickEvent, _window, cx| {
+                        app.set_country(index, cx);
+                    }))
+            })
+            .collect::<Vec<_>>();
+
+        let currency_segments = CURRENCIES
+            .iter()
+            .enumerate()
+            .map(|(index, code)| {
+                let selected = index == self.currency;
+                div()
+                    .id(SharedString::from(format!("currency-{code}")))
+                    .px_3()
+                    .py_1()
+                    .rounded(px(theme::RADIUS_SM))
+                    .cursor_pointer()
+                    .text_size(px(theme::TEXT_SM))
+                    .when(selected, |this| {
+                        this.bg(rgb(Palette::ACCENT_SOFT)).text_color(rgb(Palette::ACCENT_TEXT))
+                    })
+                    .when(!selected, |this| {
+                        this.text_color(rgb(Palette::TEXT_SECONDARY))
+                            .hover(|style| style.bg(rgb(Palette::SURFACE_HOVER)))
+                    })
+                    .child(*code)
+                    .on_click(cx.listener(move |app, _event: &ClickEvent, _window, cx| {
+                        app.set_currency(index, cx);
+                    }))
+            })
+            .collect::<Vec<_>>();
+
         div()
             .track_focus(&self.focus_handle)
             .key_context("divisas")
             .on_action(cx.listener(|app, _: &Refresh, _window, cx| app.fetch(cx)))
             .on_action(|_: &Quit, _window, cx| cx.quit())
-            .bg(rgb(0x0B1220))
-            .text_color(rgb(0xE5E7EB))
+            .bg(rgb(Palette::ROOT))
+            .text_color(rgb(Palette::TEXT))
             .size_full()
             .flex()
-            .flex_col()
+            .flex_row()
+            // ------------------------------------------------ Sidebar
             .child(
                 div()
+                    .w(px(220.))
                     .flex()
-                    .flex_row()
-                    .justify_between()
-                    .items_center()
-                    .px_4()
-                    .py_2()
-                    .bg(rgb(0x111827))
+                    .flex_col()
+                    .bg(rgb(Palette::SIDEBAR))
+                    .border_r_1()
+                    .border_color(rgb(Palette::BORDER))
+                    .p(px(theme::SPACE_LG))
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
+                            .px_3()
+                            .pb(px(theme::SPACE_XL))
                             .child(
                                 div()
-                                    .text_size(px(16.))
-                                    .text_color(white())
-                                    .child("Divisas Desktop"),
+                                    .text_size(px(theme::TEXT_LG))
+                                    .text_color(rgb(Palette::TEXT))
+                                    .child("Divisas"),
                             )
                             .child(
                                 div()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(0x6B7280))
-                                    .child(format!("{} · {}", country, currency)),
+                                    .text_size(px(theme::TEXT_XS))
+                                    .text_color(rgb(Palette::TEXT_TERTIARY))
+                                    .child("Exchange rates · divisas-cloud"),
                             ),
                     )
                     .child(
                         div()
-                            .id("refresh")
-                            .px_3()
-                            .py_1()
-                            .rounded(px(6.))
-                            .bg(rgb(0x1F2937))
-                            .text_size(px(12.))
-                            .cursor_pointer()
-                            .child("Refresh")
-                            .on_click(cx.listener(|app, _event: &ClickEvent, _window, cx| {
-                                app.fetch(cx);
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap_1()
-                    .px_4()
-                    .bg(rgb(0x111827))
-                    .children(tab_bar),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .px_4()
-                    .py_3()
-                    .child(
-                        div()
                             .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(0x6B7280))
-                                    .child("Country"),
-                            )
-                            .children(country_chips),
+                            .flex_col()
+                            .gap(px(theme::SPACE_XS))
+                            .children(nav_items),
                     )
                     .child(
                         div()
+                            .flex_1()
+                            .items_end()
                             .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
+                            .flex_col()
                             .child(
                                 div()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(0x6B7280))
-                                    .child("Currency"),
-                            )
-                            .children(currency_chips),
+                                    .px_3()
+                                    .text_size(px(theme::TEXT_XS))
+                                    .text_color(rgb(Palette::TEXT_TERTIARY))
+                                    .child("⌘R refresh · ⌘Q quit"),
+                            ),
                     ),
             )
+            // ------------------------------------------------ Main column
             .child(
                 div()
-                    .id("content")
                     .flex_1()
-                    .overflow_y_scroll()
-                    .px_4()
-                    .pb_4()
-                    .child(render_body(&self.data)),
-            )
-            .child(
-                div()
-                    .px_4()
-                    .py_2()
-                    .bg(rgb(0x111827))
-                    .text_size(px(11.))
-                    .text_color(rgb(0x6B7280))
-                    .child(self.status.clone().unwrap_or_else(|| {
-                        "divisas-cloud · GET /v1/rates/latest, /v1/banks, /v1/official, /v1/averages, /v1/remittance/quotes".into()
-                    })),
+                    .flex()
+                    .flex_col()
+                    .child(
+                        // Header: title + segmented switchers
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(theme::SPACE_LG))
+                            .px(px(theme::SPACE_2XL))
+                            .pt(px(theme::SPACE_XL))
+                            .pb(px(theme::SPACE_LG))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .justify_between()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .text_size(px(theme::TEXT_XL))
+                                            .text_color(rgb(Palette::TEXT))
+                                            .child(tab.label()),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("refresh")
+                                            .px_4()
+                                            .py_2()
+                                            .rounded(px(theme::RADIUS_SM))
+                                            .bg(rgb(Palette::SURFACE))
+                                            .border_1()
+                                            .border_color(rgb(Palette::BORDER))
+                                            .text_size(px(theme::TEXT_SM))
+                                            .text_color(rgb(Palette::TEXT_SECONDARY))
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(rgb(Palette::SURFACE_HOVER)))
+                                            .child("Refresh")
+                                            .on_click(cx.listener(|app, _event: &ClickEvent, _window, cx| {
+                                                app.fetch(cx);
+                                            })),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(theme::SPACE_LG))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_1()
+                                            .p(px(theme::SPACE_XS))
+                                            .rounded(px(theme::RADIUS_SM))
+                                            .bg(rgb(Palette::SURFACE_SUNKEN))
+                                            .children(country_segments),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_1()
+                                            .p(px(theme::SPACE_XS))
+                                            .rounded(px(theme::RADIUS_SM))
+                                            .bg(rgb(Palette::SURFACE_SUNKEN))
+                                            .children(currency_segments),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("content")
+                            .flex_1()
+                            .overflow_y_scroll()
+                            .px(px(theme::SPACE_2XL))
+                            .pb(px(theme::SPACE_XL))
+                            .child(
+                                div()
+                                    .max_w(px(880.))
+                                    .child(render_body(&self.data)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .px(px(theme::SPACE_2XL))
+                            .py(px(theme::SPACE_MD))
+                            .border_t_1()
+                            .border_color(rgb(Palette::BORDER))
+                            .text_size(px(theme::TEXT_XS))
+                            .text_color(rgb(Palette::TEXT_TERTIARY))
+                            .child(self.status.clone().unwrap_or_else(|| {
+                                format!("{country} · {currency} · divisas-cloud API").into()
+                            })),
+                    ),
             )
     }
 }
@@ -614,151 +672,436 @@ fn render_body(data: &Data) -> AnyElement {
     match data {
         Data::Empty => message("No data. Press Refresh."),
         Data::Loading => message("Loading…"),
-        Data::Error(message) => message_box(message, rgb(0x7F1D1D), rgb(0xFCA5A5)),
-        Data::Rates(rows) => table(
-            &["Bank", "Currency", "Buy", "Sell"],
-            rows.iter()
-                .map(|row| {
-                    vec![
-                        row.name.clone(),
-                        row.currency.clone(),
-                        format!("{:.4}", row.buy),
-                        format!("{:.4}", row.sell),
-                    ]
-                })
-                .collect(),
-        ),
-        Data::Banks(banks) => table(
-            &["Bank", "Type", "Rates", "Last updated"],
+        Data::Error(message) => message_box(message, rgb(Palette::DOWN_SOFT), rgb(Palette::DOWN)),
+        Data::Rates(rows) => rates_view(rows),
+        Data::Banks(banks) => banks_view(banks),
+        Data::Averages(rows) => averages_view(rows),
+        Data::Remittance(quotes) => remittance_view(quotes),
+    }
+}
+
+/// Metric strip shown above the rates grid.
+fn metric_tile(label: &str, value: String, color: Rgba) -> AnyElement {
+    div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p(px(theme::SPACE_LG))
+        .rounded(px(theme::RADIUS_MD))
+        .bg(rgb(Palette::SURFACE))
+        .border_1()
+        .border_color(rgb(Palette::BORDER))
+        .child(
+            div()
+                .text_size(px(theme::TEXT_XS))
+                .text_color(rgb(Palette::TEXT_SECONDARY))
+                .child(label.to_string()),
+        )
+        .child(
+            div()
+                .text_size(px(theme::TEXT_LG))
+                .text_color(color)
+                .child(value),
+        )
+        .into_any_element()
+}
+
+fn rates_view(rows: &[RateRow]) -> AnyElement {
+    let best_buy = rows.iter().map(|r| r.buy).fold(f64::NEG_INFINITY, f64::max);
+    let best_sell = rows.iter().map(|r| r.sell).fold(f64::INFINITY, f64::min);
+    let avg_buy = if rows.is_empty() {
+        0.
+    } else {
+        rows.iter().map(|r| r.buy).sum::<f64>() / rows.len() as f64
+    };
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(theme::SPACE_LG))
+        .child(
+            // Metric strip
+            div()
+                .flex()
+                .flex_row()
+                .gap(px(theme::SPACE_MD))
+                .child(metric_tile("Best buy", theme::format_rate(best_buy), UP))
+                .child(metric_tile("Best sell", theme::format_rate(best_sell), DOWN))
+                .child(metric_tile("Market avg", theme::format_rate(avg_buy), TEXT_PRIMARY))
+                .child(metric_tile(
+                    "Banks",
+                    rows.len().to_string(),
+                    TEXT_PRIMARY,
+                )),
+        )
+        .child(
+            // Rate cards grid
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(theme::SPACE_MD))
+                .children(
+                    rows.iter()
+                        .map(|row| {
+                            let direction = theme::parse_direction(row.buy_change.as_deref());
+                            let is_best = row.buy == best_buy && rows.len() > 1;
+                            rate_card(row, direction, is_best)
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+        )
+        .into_any_element()
+}
+
+fn rate_card(row: &RateRow, direction: theme::Direction, is_best: bool) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(theme::SPACE_LG))
+        .p(px(theme::SPACE_LG))
+        .rounded(px(theme::RADIUS_MD))
+        .bg(rgb(Palette::SURFACE))
+        .border_1()
+        .border_color(rgb(Palette::BORDER))
+        .hover(|style| style.bg(rgb(Palette::SURFACE_HOVER)))
+        .child(
+            // Bank identity
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(px(theme::TEXT_BASE))
+                                .text_color(rgb(Palette::TEXT))
+                                .child(row.name.clone()),
+                        )
+                        .when(is_best, |this| {
+                            this.child(
+                                div()
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded(px(theme::RADIUS_SM))
+                                    .bg(rgb(Palette::UP_SOFT))
+                                    .text_size(px(theme::TEXT_XS))
+                                    .text_color(rgb(Palette::UP))
+                                    .child("BEST"),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .text_size(px(theme::TEXT_XS))
+                        .text_color(rgb(Palette::TEXT_TERTIARY))
+                        .child(
+                            row.last_updated
+                                .as_deref()
+                                .map(theme::short_time)
+                                .unwrap_or_else(|| "—".into()),
+                        ),
+                ),
+        )
+        // Buy
+        .child(
+            div()
+                .w(px(140.))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(theme::TEXT_XS))
+                        .text_color(rgb(Palette::TEXT_SECONDARY))
+                        .child("Buy"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(px(theme::TEXT_LG))
+                                .text_color(rgb(Palette::TEXT))
+                                .child(theme::format_rate(row.buy)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(theme::TEXT_XS))
+                                .text_color(direction.color())
+                                .child(direction.arrow()),
+                        ),
+                ),
+        )
+        // Sell
+        .child(
+            div()
+                .w(px(140.))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(theme::TEXT_XS))
+                        .text_color(rgb(Palette::TEXT_SECONDARY))
+                        .child("Sell"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_size(px(theme::TEXT_LG))
+                                .text_color(rgb(Palette::TEXT_SECONDARY))
+                                .child(theme::format_rate(row.sell)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(theme::TEXT_XS))
+                                .text_color(
+                                    theme::parse_direction(row.sell_change.as_deref()).color(),
+                                )
+                                .child(theme::parse_direction(row.sell_change.as_deref()).arrow()),
+                        ),
+                ),
+        )
+        .into_any_element()
+}
+
+fn banks_view(banks: &[Bank]) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(theme::SPACE_MD))
+        .children(
             banks
                 .iter()
                 .map(|bank| {
-                    vec![
-                        bank.name.clone(),
-                        bank.institution_type.clone().unwrap_or_default(),
-                        bank.rates
-                            .iter()
-                            .map(|rate| format!("{} {:.4}/{:.4}", rate.currency, rate.buy, rate.sell))
-                            .collect::<Vec<_>>()
-                            .join(" · "),
-                        bank.last_updated.clone().unwrap_or_default(),
-                    ]
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(theme::SPACE_MD))
+                        .p(px(theme::SPACE_LG))
+                        .rounded(px(theme::RADIUS_MD))
+                        .bg(rgb(Palette::SURFACE))
+                        .border_1()
+                        .border_color(rgb(Palette::BORDER))
+                        .hover(|style| style.bg(rgb(Palette::SURFACE_HOVER)))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_size(px(theme::TEXT_BASE))
+                                        .text_color(rgb(Palette::TEXT))
+                                        .child(bank.name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(theme::TEXT_XS))
+                                        .text_color(rgb(Palette::TEXT_TERTIARY))
+                                        .child(
+                                            bank.last_updated
+                                                .as_deref()
+                                                .map(theme::short_time)
+                                                .unwrap_or_else(|| "—".into()),
+                                        ),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .flex_wrap()
+                                .gap(px(theme::SPACE_SM))
+                                .children(bank.rates.iter().map(|rate| {
+                                    div()
+                                        .px_3()
+                                        .py_1()
+                                        .rounded(px(theme::RADIUS_SM))
+                                        .bg(rgb(Palette::SURFACE_SUNKEN))
+                                        .text_size(px(theme::TEXT_XS))
+                                        .text_color(rgb(Palette::TEXT_SECONDARY))
+                                        .child(format!(
+                                            "{}  {} / {}",
+                                            rate.currency,
+                                            theme::format_rate(rate.buy),
+                                            theme::format_rate(rate.sell)
+                                        ))
+                                })),
+                        )
                 })
-                .collect(),
-        ),
-        Data::Averages(rows) => table(
-            &["Country", "Currency", "Avg buy", "Avg sale", "Spread"],
+                .collect::<Vec<_>>(),
+        )
+        .into_any_element()
+}
+
+fn averages_view(rows: &[MarketAverage]) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(theme::SPACE_MD))
+        .children(
             rows.iter()
                 .map(|row| {
-                    vec![
-                        row.country.clone(),
-                        row.currency.clone(),
-                        format!("{:.4}", row.avg_buy),
-                        format!("{:.4}", row.avg_sale),
-                        row.avg_spread
-                            .map(|spread| format!("{spread:.4}"))
-                            .unwrap_or_else(|| "—".into()),
-                    ]
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(theme::SPACE_LG))
+                        .p(px(theme::SPACE_LG))
+                        .rounded(px(theme::RADIUS_MD))
+                        .bg(rgb(Palette::SURFACE))
+                        .border_1()
+                        .border_color(rgb(Palette::BORDER))
+                        .child(
+                            div()
+                                .w(px(64.))
+                                .text_size(px(theme::TEXT_BASE))
+                                .text_color(rgb(Palette::TEXT))
+                                .child(row.currency.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(theme::TEXT_XS))
+                                .text_color(rgb(Palette::UP))
+                                .child(format!("buy {}", theme::format_rate(row.avg_buy))),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(theme::TEXT_XS))
+                                .text_color(rgb(Palette::DOWN))
+                                .child(format!("sell {}", theme::format_rate(row.avg_sale))),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(theme::TEXT_XS))
+                                .text_color(rgb(Palette::TEXT_SECONDARY))
+                                .child(format!(
+                                    "spread {}",
+                                    row.avg_spread
+                                        .map(|spread| theme::format_rate(spread))
+                                        .unwrap_or_else(|| "—".into())
+                                )),
+                        )
                 })
-                .collect(),
-        ),
-        Data::Remittance(quotes) => table(
-            &["Provider", "Rate", "Fee USD", "Receive"],
+                .collect::<Vec<_>>(),
+        )
+        .into_any_element()
+}
+
+fn remittance_view(quotes: &[RemittanceQuote]) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(theme::SPACE_MD))
+        .children(
             quotes
                 .iter()
-                .map(|quote| {
-                    vec![
-                        quote.name.clone(),
-                        quote
-                            .exchange_rate
-                            .map(|rate| format!("{rate:.4}"))
-                            .unwrap_or_else(|| "—".into()),
-                        quote
-                            .fee_usd
-                            .map(|fee| format!("{fee:.2}"))
-                            .unwrap_or_else(|| "—".into()),
-                        quote
-                            .amount_received
-                            .map(|amount| format!("{amount:.2}"))
-                            .unwrap_or_else(|| "—".into()),
-                    ]
+                .enumerate()
+                .map(|(index, quote)| {
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(theme::SPACE_LG))
+                        .p(px(theme::SPACE_LG))
+                        .rounded(px(theme::RADIUS_MD))
+                        .bg(rgb(Palette::SURFACE))
+                        .border_1()
+                        .border_color(rgb(Palette::BORDER))
+                        .hover(|style| style.bg(rgb(Palette::SURFACE_HOVER)))
+                        .child(
+                            div()
+                                .w(px(32.))
+                                .text_size(px(theme::TEXT_LG))
+                                .text_color(rgb(Palette::TEXT_TERTIARY))
+                                .child(format!("{}", index + 1)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(theme::TEXT_BASE))
+                                .text_color(rgb(Palette::TEXT))
+                                .child(quote.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .w(px(110.))
+                                .text_size(px(theme::TEXT_SM))
+                                .text_color(rgb(Palette::TEXT_SECONDARY))
+                                .child(
+                                    quote
+                                        .exchange_rate
+                                        .map(|rate| format!("×{:.4}", rate))
+                                        .unwrap_or_else(|| "—".into()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .w(px(90.))
+                                .text_size(px(theme::TEXT_SM))
+                                .text_color(rgb(Palette::TEXT_SECONDARY))
+                                .child(
+                                    quote
+                                        .fee_usd
+                                        .map(|fee| format!("${fee:.2}"))
+                                        .unwrap_or_else(|| "—".into()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .w(px(120.))
+                                .text_size(px(theme::TEXT_BASE))
+                                .text_color(rgb(Palette::UP))
+                                .child(
+                                    quote
+                                        .amount_received
+                                        .map(|amount| format!("${amount:.2}"))
+                                        .unwrap_or_else(|| "—".into()),
+                                ),
+                        )
                 })
-                .collect(),
-        ),
-    }
+                .collect::<Vec<_>>(),
+        )
+        .into_any_element()
 }
 
 fn message(text: &str) -> AnyElement {
     div()
-        .p_4()
-        .text_size(px(13.))
-        .text_color(rgb(0x6B7280))
+        .p(px(theme::SPACE_2XL))
+        .text_size(px(theme::TEXT_BASE))
+        .text_color(rgb(Palette::TEXT_TERTIARY))
         .child(text.to_string())
         .into_any_element()
 }
 
 fn message_box(text: &str, bg: gpui::Rgba, fg: gpui::Rgba) -> AnyElement {
     div()
-        .m_4()
-        .p_3()
-        .rounded(px(8.))
+        .p(px(theme::SPACE_LG))
+        .rounded(px(theme::RADIUS_MD))
         .bg(bg)
         .text_color(fg)
-        .text_size(px(13.))
+        .text_size(px(theme::TEXT_BASE))
         .child(text.to_string())
         .into_any_element()
 }
 
-fn table(header: &[&str], rows: Vec<Vec<String>>) -> AnyElement {
-    let header_cells = header
-        .iter()
-        .map(|label| {
-            div()
-                .flex_1()
-                .px_3()
-                .py_2()
-                .text_size(px(11.))
-                .text_color(rgb(0x9CA3AF))
-                .child(label.to_string())
-        })
-        .collect::<Vec<_>>();
-
-    let body = rows
-        .into_iter()
-        .map(|cells| {
-            div()
-                .flex()
-                .flex_row()
-                .w_full()
-                .rounded(px(6.))
-                .bg(rgb(0x111827))
-                .mb_1()
-                .children(cells.into_iter().map(|cell| {
-                    div()
-                        .flex_1()
-                        .px_3()
-                        .py_2()
-                        .text_size(px(12.))
-                        .child(cell)
-                }))
-        })
-        .collect::<Vec<_>>();
-
-    div()
-        .flex()
-        .flex_col()
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .w_full()
-                .border_b_1()
-                .border_color(rgb(0x1F2937))
-                .children(header_cells),
-        )
-        .children(body)
-        .into_any_element()
-}
 
 // ----------------------------------------------------------------------
 // Entry point
