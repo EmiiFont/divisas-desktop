@@ -1042,14 +1042,151 @@ fn render_drawer(drawer: &Drawer, cx: &mut Context<DivisasApp>) -> AnyElement {
 
 fn render_body(data: &Data, cx: &mut Context<DivisasApp>) -> AnyElement {
     match data {
-        Data::Empty => message("No data. Press Refresh."),
+        Data::Empty => empty_state(cx),
         Data::Loading => skeleton_list(6),
-        Data::Error(message) => message_box(message, DOWN_SOFT, DOWN),
+        Data::Error(message) => error_state(message, cx),
         Data::Rates(rows) => rates_view(rows, cx),
         Data::Banks(banks) => banks_view(banks),
         Data::Averages(rows) => averages_view(rows),
         Data::Remittance(quotes) => remittance_view(quotes),
     }
+}
+
+/// Friendly empty state with a hint tailored to the current tab.
+fn empty_state(cx: &mut Context<DivisasApp>) -> AnyElement {
+    let (title, hint) = match cx.entity().read(cx).tab {
+        Tab::Rates => (
+            "No rates for this pair yet",
+            "Try another country or currency, or check back later.",
+        ),
+        Tab::Banks => (
+            "No banks found",
+            "This country has no bank rates published yet.",
+        ),
+        Tab::Official => (
+            "No official rates",
+            "The central bank hasn't published rates for this currency yet.",
+        ),
+        Tab::Averages => (
+            "No market averages",
+            "Averages appear once enough banks report for this pair.",
+        ),
+        Tab::Remittance => (
+            "No remittance quotes",
+            "Try a different destination country.",
+        ),
+    };
+    empty_state_card(title, hint, cx)
+}
+
+/// Centered empty-state card with a refresh action.
+fn empty_state_card(title: &str, hint: &str, cx: &mut Context<DivisasApp>) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(theme::SPACE_MD))
+        .py(px(theme::SPACE_2XL + theme::SPACE_2XL))
+        .child(
+            div()
+                .size(px(48.))
+                .rounded_full()
+                .bg(rgb(Palette::SURFACE_SUNKEN))
+                .border_1()
+                .border_color(rgb(Palette::BORDER))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(theme::TEXT_XL))
+                .text_color(rgb(Palette::TEXT_TERTIARY))
+                .child("◎"),
+        )
+        .child(
+            div()
+                .text_size(px(theme::TEXT_MD))
+                .text_color(rgb(Palette::TEXT))
+                .child(title.to_string()),
+        )
+        .child(
+            div()
+                .text_size(px(theme::TEXT_SM))
+                .text_color(rgb(Palette::TEXT_TERTIARY))
+                .child(hint.to_string()),
+        )
+        .child(
+            div()
+                .id("empty-refresh")
+                .mt(px(theme::SPACE_SM))
+                .px_4()
+                .py_2()
+                .rounded(px(theme::RADIUS_SM))
+                .bg(rgb(Palette::SURFACE))
+                .border_1()
+                .border_color(rgb(Palette::BORDER))
+                .text_size(px(theme::TEXT_SM))
+                .text_color(rgb(Palette::ACCENT))
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(Palette::SURFACE_HOVER)))
+                .child("Refresh")
+                .on_click(cx.listener(|app, _event: &ClickEvent, _window, cx| {
+                    app.fetch(cx);
+                })),
+        )
+        .into_any_element()
+}
+
+/// Error banner with a retry action.
+fn error_state(message: &str, cx: &mut Context<DivisasApp>) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(theme::SPACE_MD))
+        .py(px(theme::SPACE_2XL + theme::SPACE_2XL))
+        .child(
+            div()
+                .max_w(px(560.))
+                .flex()
+                .flex_col()
+                .gap(px(theme::SPACE_SM))
+                .p(px(theme::SPACE_LG))
+                .rounded(px(theme::RADIUS_MD))
+                .bg(rgb(Palette::DOWN_SOFT))
+                .border_1()
+                .border_color(rgb(Palette::DOWN))
+                .child(
+                    div()
+                        .text_size(px(theme::TEXT_BASE))
+                        .text_color(rgb(Palette::DOWN))
+                        .child("Couldn't load data"),
+                )
+                .child(
+                    div()
+                        .text_size(px(theme::TEXT_SM))
+                        .text_color(rgb(Palette::TEXT_SECONDARY))
+                        .child(message.to_string()),
+                ),
+        )
+        .child(
+            div()
+                .id("error-retry")
+                .px_4()
+                .py_2()
+                .rounded(px(theme::RADIUS_SM))
+                .bg(rgb(Palette::SURFACE))
+                .border_1()
+                .border_color(rgb(Palette::BORDER))
+                .text_size(px(theme::TEXT_SM))
+                .text_color(rgb(Palette::ACCENT))
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(Palette::SURFACE_HOVER)))
+                .child("Try again")
+                .on_click(cx.listener(|app, _event: &ClickEvent, _window, cx| {
+                    app.fetch(cx);
+                })),
+        )
+        .into_any_element()
 }
 
 /// Metric strip shown above the rates grid.
@@ -1573,15 +1710,6 @@ fn remittance_view(quotes: &[RemittanceQuote]) -> AnyElement {
     }
 
     cards.into_any_element()
-}
-
-fn message(text: &str) -> AnyElement {
-    div()
-        .p(px(theme::SPACE_2XL))
-        .text_size(px(theme::TEXT_BASE))
-        .text_color(rgb(Palette::TEXT_TERTIARY))
-        .child(text.to_string())
-        .into_any_element()
 }
 
 /// Pulsing placeholder card used while data is loading.
