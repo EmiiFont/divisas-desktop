@@ -38,9 +38,14 @@ Responses use the `{ data, meta }` envelope; errors are `{ "error": { code, mess
 ## Running
 
 ```sh
-export DIVISAS_WEB_API_KEY="<AIza... web API key from Firebase project settings>"  # for sign-in
-# optional: export DIVISAS_API_BASE_URL="https://divisas-api-production-9a6a0cb6.up.railway.app"
 cargo run -p divisas-ui
+```
+
+The Firebase web API key is baked in (`DIVISAS_WEB_API_KEY` overrides it). Overrides:
+
+```sh
+export DIVISAS_API_KEY="..."        # bypass login with a pre-minted key
+export DIVISAS_API_BASE_URL="..."   # override the Railway URL
 ```
 
 ### Sign-in flow

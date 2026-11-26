@@ -23,9 +23,18 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 pub const DEFAULT_BASE_URL: &str = "https://divisas-api-production-9a6a0cb6.up.railway.app";
 
 /// Firebase web API key (Identity Toolkit) used to exchange email + password
-/// for an ID token. Set with `DIVISAS_WEB_API_KEY`.
+/// for an ID token. Public client identifier; override with
+/// `DIVISAS_WEB_API_KEY` if the project's key changes.
+pub const DEFAULT_WEB_API_KEY: &str = "AIzaSyAbL6EFTvi-WrdJ512eIOzNkibZhB8jvSI";
+
+/// Google Identity Toolkit endpoint for email + password sign-in.
 pub const IDENTITY_TOOLKIT_URL: &str =
     "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword";
+
+/// Google Identity Toolkit endpoint for anonymous sign-in (signUp without
+/// email/password creates an anonymous user).
+pub const IDENTITY_TOOLKIT_SIGNUP_URL: &str =
+    "https://identitytoolkit.googleapis.com/v1/accounts:signUp";
 
 pub const COUNTRIES: &[&str] = &["DO", "CO", "PE", "GT", "CR", "NI", "MX"];
 pub const CURRENCIES: &[&str] = &["USD", "EUR", "CHF", "GBP", "CAD"];
@@ -184,6 +193,14 @@ impl DivisasClient {
         serde_json::from_value(body).map_err(ApiError::from)
     }
 
+    /// Sign in anonymously against Firebase Identity Toolkit and immediately
+    /// mint an API key. The backend must allow anonymous users for the key
+    /// issuance to succeed.
+    pub fn sign_in_anonymous_and_issue_key(&self, web_api_key: &str) -> Result<ApiKeyIssued, ApiError> {
+        let id_token = sign_in_anonymous(web_api_key)?;
+        self.request_api_key(&id_token)
+    }
+
     /// Sign in with email + password against Firebase Identity Toolkit and
     /// immediately mint an API key. Convenience wrapper over [`Self::sign_in`]
     /// and [`Self::request_api_key`].
@@ -305,6 +322,37 @@ pub fn sign_in_password(
             status: status.as_u16(),
             code: "missing-id-token".into(),
             message: "Sign-in response did not contain an idToken.".into(),
+        })
+}
+
+/// Sign in anonymously (create an anonymous Firebase user) and return the
+/// ID token.
+pub fn sign_in_anonymous(web_api_key: &str) -> Result<String, ApiError> {
+    sign_up_anonymous(web_api_key)
+}
+
+fn sign_up_anonymous(web_api_key: &str) -> Result<String, ApiError> {
+    let url = format!("{IDENTITY_TOOLKIT_SIGNUP_URL}?key={web_api_key}");
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(15)))
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let mut response = agent
+        .post(&url)
+        .send_json(&serde_json::json!({ "returnSecureToken": true }))?;
+    let status = response.status();
+    let body: serde_json::Value = response.body_mut().read_json()?;
+    if !status.is_success() {
+        return Err(json_error_body(&body, status.as_u16()));
+    }
+    body.get("idToken")
+        .and_then(|token| token.as_str())
+        .map(|token| token.to_string())
+        .ok_or_else(|| ApiError::Api {
+            status: status.as_u16(),
+            code: "missing-id-token".into(),
+            message: "Sign-up response did not contain an idToken.".into(),
         })
 }
 

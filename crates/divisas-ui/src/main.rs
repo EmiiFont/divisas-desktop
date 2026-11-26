@@ -14,8 +14,8 @@ use gpui::{
     WindowOptions, actions, div, prelude::*, px, rgb, size, white,
 };
 
-use divisas_api::{ApiError, Bank, COUNTRIES, CURRENCIES, DivisasClient, MarketAverage, RateRow, RemittanceQuote, flatten_averages};
-use text_input::{InputField, TextInput};
+use divisas_api::{ApiKeyIssued, ApiError, Bank, COUNTRIES, CURRENCIES, DivisasClient, MarketAverage, RateRow, RemittanceQuote, flatten_averages};
+use text_input::TextInput;
 
 // ----------------------------------------------------------------------
 // Actions
@@ -80,7 +80,7 @@ enum Screen {
 
 struct DivisasApp {
     client: DivisasClient,
-    web_api_key: Option<String>,
+    web_api_key: String,
     focus_handle: FocusHandle,
     screen: Screen,
     tab: Tab,
@@ -179,13 +179,7 @@ impl DivisasApp {
             cx.notify();
             return;
         }
-        let Some(web_api_key) = self.web_api_key.clone() else {
-            *error = Some(
-                "Set DIVISAS_WEB_API_KEY (Firebase web API key) to enable sign-in.".into(),
-            );
-            cx.notify();
-            return;
-        };
+        let web_api_key = self.web_api_key.clone();
 
         *busy = true;
         cx.notify();
@@ -198,35 +192,66 @@ impl DivisasApp {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |app, cx| {
-                let Screen::Login { error, busy, .. } = &mut app.screen else {
-                    return;
-                };
-                *busy = false;
-                match result {
-                    Ok(issued) => {
-                        if let Err(err) = keychain::save_api_key(&issued.api_key) {
-                            *error = Some(format!("Signed in, but could not store key: {err}"));
-                        } else {
-                            app.client = DivisasClient::with_base_url(
-                                issued.api_key,
-                                divisas_api::DEFAULT_BASE_URL,
-                            );
-                            app.screen = Screen::Main;
-                            app.fetch(cx);
-                        }
-                    }
-                    Err(ApiError::Api { status, code, message }) => {
-                        *error = Some(format!("HTTP {status} — {code}: {message}"));
-                    }
-                    Err(err) => {
-                        *error = Some(err.to_string());
-                    }
-                }
-                cx.notify();
+                app.finish_sign_in(result, cx);
             })
             .ok();
         })
         .detach();
+    }
+
+    fn sign_in_anonymous(&mut self, cx: &mut Context<Self>) {
+        let Screen::Login { error, busy, .. } = &mut self.screen else {
+            return;
+        };
+        *error = None;
+        if *busy {
+            return;
+        }
+        *busy = true;
+        cx.notify();
+
+        let client = self.client.clone();
+        let web_api_key = self.web_api_key.clone();
+        let task = cx.background_executor().spawn(async move {
+            client.sign_in_anonymous_and_issue_key(&web_api_key)
+        });
+
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |app, cx| {
+                app.finish_sign_in(result, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn finish_sign_in(&mut self, result: Result<ApiKeyIssued, ApiError>, cx: &mut Context<Self>) {
+        let Screen::Login { error, busy, .. } = &mut self.screen else {
+            return;
+        };
+        *busy = false;
+        match result {
+            Ok(issued) => {
+                if let Err(err) = keychain::save_api_key(&issued.api_key) {
+                    *error = Some(format!("Signed in, but could not store key: {err}"));
+                } else {
+                    self.client = DivisasClient::with_base_url(
+                        issued.api_key,
+                        divisas_api::DEFAULT_BASE_URL,
+                    );
+                    self.screen = Screen::Main;
+                    self.fetch(cx);
+                }
+            }
+            Err(ApiError::Api { status, code, message }) => {
+                *error = Some(format!("HTTP {status} — {code}: {message}"));
+            }
+            Err(err) => {
+                *error = Some(err.to_string());
+            }
+        }
+        cx.notify();
     }
 
     fn set_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
@@ -321,7 +346,10 @@ impl DivisasApp {
                                     window.focus(&email.read(cx).focus_handle(cx));
                                 }
                             }))
-                            .child(InputField { input: email_focus }),
+                            // Render the TextInput entity itself: it owns the
+                            // action handlers (backspace, arrows, paste) and
+                            // key context. A bare InputField would only paint.
+                            .child(email_focus),
                     )
                     .child(
                         div()
@@ -336,7 +364,7 @@ impl DivisasApp {
                                     window.focus(&password.read(cx).focus_handle(cx));
                                 }
                             }))
-                            .child(InputField { input: password_submit }),
+                            .child(password_submit),
                     )
                     .child(
                         div()
@@ -354,6 +382,22 @@ impl DivisasApp {
                                 app.sign_in(cx);
                             })),
                     )
+                    .child(
+                        div()
+                            .id("guest")
+                            .px_4()
+                            .py_2()
+                            .rounded(px(6.))
+                            .bg(rgb(0x1F2937))
+                            .text_color(rgb(0x9CA3AF))
+                            .text_size(px(13.))
+                            .cursor_pointer()
+                            .hover(|this| this.opacity(0.9))
+                            .child(if busy { "Working…" } else { "Continue as guest" })
+                            .on_click(cx.listener(|app, _: &ClickEvent, _window, cx| {
+                                app.sign_in_anonymous(cx);
+                            })),
+                    )
                     .children(error.clone().map(|message| {
                         div()
                             .p_3()
@@ -367,7 +411,7 @@ impl DivisasApp {
                         div()
                             .text_size(px(11.))
                             .text_color(rgb(0x6B7280))
-                            .child("Enter submits. Email + password are sent only to Firebase."),
+                            .child("Enter submits. \"Continue as guest\" signs in anonymously (the backend must allow anonymous API keys)."),
                     ),
             )
     }
@@ -728,7 +772,10 @@ fn main() {
             KeyBinding::new("cmd-q", Quit, Some("divisas")),
         ]);
 
-        let web_api_key = std::env::var("DIVISAS_WEB_API_KEY").ok().filter(|key| !key.is_empty());
+        let web_api_key = std::env::var("DIVISAS_WEB_API_KEY")
+            .ok()
+            .filter(|key| !key.is_empty())
+            .unwrap_or(divisas_api::DEFAULT_WEB_API_KEY.into());
         let base_url = std::env::var("DIVISAS_API_BASE_URL")
             .unwrap_or(divisas_api::DEFAULT_BASE_URL.into());
 
